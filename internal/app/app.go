@@ -43,15 +43,6 @@ func New() (*App, error) {
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo)
 	router := apphttp.NewRouter(cfg, jobsHandler)
 
-	executor := sandbox.NewRunscExecutor(sandbox.RunscExecutorConfig{
-		WorkDir:        cfg.JudgeWorkDir,
-		Runtime:        cfg.JudgeRuntime,
-		Image:          cfg.JudgeGoImage,
-		TimeoutSeconds: cfg.JudgeTimeoutSeconds,
-		MemoryLimit:    cfg.JudgeMemoryLimit,
-		CPULimit:       cfg.JudgeCPULimit,
-	})
-
 	executor := sandbox.NewRunscExecutor()
 
 	runnerSvc := runner.NewService(cfg, executor)
