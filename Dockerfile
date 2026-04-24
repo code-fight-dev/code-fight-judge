@@ -13,11 +13,9 @@ FROM alpine:3.20
 
 WORKDIR /app
 
-RUN adduser -D -u 10001 appuser
+RUN apk add --no-cache docker-cli
 
 COPY --from=builder /bin/judge /app/judge
-
-USER appuser
 
 EXPOSE 8081
 
