@@ -50,9 +50,9 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) processOne(ctx context.Context) error {
-	job, err := w.repo.PickQueued(ctx)
+	job, err := w.repo.ClaimNextQueued(ctx)
 	if err != nil {
-		return fmt.Errorf("pick queued job: %w", err)
+		return fmt.Errorf("claim next queued job: %w", err)
 	}
 	if job == nil {
 		return nil
@@ -67,31 +67,36 @@ func (w *Worker) processOne(ctx context.Context) error {
 
 		callbackErr := w.callbackClient.SendResult(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
 			JudgeSubmissionID: job.ID,
+			SubmissionID:      job.SubmissionID,
 			JudgeStatus:       "finished",
 
-			Verdict: "internal_error",
+			Verdict:      stringPtr("system_error"),
+			ErrorMessage: stringPtr(runErr.Error()),
 
 			PassedTests: 0,
 			TotalTests:  len(job.Tests),
 			Score:       0,
 
-			ExitCode: -1,
+			CompileTimeMs: nil,
+			RunTimeMs:     intPtr(0),
+			PeakMemoryKb:  intPtr(0),
+			ExitCode:      intPtr(-1),
 
-			CompileLog:      "",
-			StdoutTruncated: "",
-			StderrTruncated: "",
+			CompileLog:      stringPtr(""),
+			StdoutTruncated: stringPtr(""),
+			StderrTruncated: stringPtr(""),
 
-			RunTimeMS:    0,
-			PeakMemoryKB: 0,
-
-			ErrorMessage: runErr.Error(),
+			StartedAt:  nil,
+			FinishedAt: nil,
+			Tests:      []callback.TestResult{},
 		})
 		if callbackErr != nil {
+			_ = w.repo.MarkFailed(ctx, job.ID)
 			return fmt.Errorf("send internal error callback: %w", callbackErr)
 		}
 
-		if err := w.repo.MarkFinished(ctx, job.ID); err != nil {
-			return fmt.Errorf("mark job finished: %w", err)
+		if err := w.repo.MarkFailed(ctx, job.ID); err != nil {
+			return fmt.Errorf("mark job failed: %w", err)
 		}
 
 		return nil
@@ -111,8 +116,8 @@ func (w *Worker) processOne(ctx context.Context) error {
 
 		CompileTimeMs: nil,
 		RunTimeMs:     int64ToIntPtr(result.DurationMS),
-		PeakMemoryKb: intPtr(0),
-		ExitCode:     intPtr(result.ExitCode),
+		PeakMemoryKb:  intPtr(0),
+		ExitCode:      intPtr(result.ExitCode),
 
 		CompileLog:      stringPtr(""),
 		StdoutTruncated: stringPtr(truncateString(result.Stdout, job.Limits.OutputKB*1024)),
@@ -123,6 +128,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 		Tests:      []callback.TestResult{},
 	})
 	if callbackErr != nil {
+		_ = w.repo.MarkFailed(ctx, job.ID)
 		return fmt.Errorf("send callback: %w", callbackErr)
 	}
 
@@ -171,5 +177,6 @@ func nullableString(v string) *string {
 	if v == "" {
 		return nil
 	}
+
 	return &v
 }

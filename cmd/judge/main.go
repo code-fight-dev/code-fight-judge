@@ -21,4 +21,4 @@ func main() {
 	if err := application.Run(ctx); err != nil {
 		log.Fatalf("app run failed: %v", err)
 	}
-}
+} 
