@@ -10,6 +10,7 @@ import (
 
 	"code-fight-judge/internal/config"
 	apphttp "code-fight-judge/internal/http"
+	"code-fight-judge/internal/callback"
 	"code-fight-judge/internal/queue"
 	"code-fight-judge/internal/runner"
 	"code-fight-judge/internal/sandbox"
@@ -46,7 +47,9 @@ func New() (*App, error) {
 	executor := sandbox.NewRunscExecutor()
 
 	runnerSvc := runner.NewService(cfg, executor)
-	worker := queue.NewWorker(jobsRepo, runnerSvc, 2*time.Second)
+	callbackClient := callback.NewClient(10 * time.Second)
+
+	worker := queue.NewWorker(jobsRepo, runnerSvc, callbackClient, 2*time.Second)
 
 	server := &http.Server{
 		Addr:         cfg.Address(),

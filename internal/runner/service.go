@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"code-fight-judge/internal/config"
 	"code-fight-judge/internal/jobs"
@@ -23,16 +24,30 @@ func NewService(cfg config.Config, executor sandbox.Executor) *Service {
 	}
 }
 
-func (s *Service) Run(ctx context.Context, job *jobs.Job) error {
+type RunResult struct {
+	ExitCode   int
+	Stdout     string
+	Stderr     string
+	DurationMS int64
+
+	Verdict     string
+	PassedTests int
+	TotalTests  int
+	Score       int
+
+	ErrorMessage string
+}
+
+func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 	workDir, err := os.MkdirTemp(s.cfg.JudgeWorkDir, "judge-job-*")
 	if err != nil {
-		return fmt.Errorf("create temp workdir: %w", err)
+		return nil, fmt.Errorf("create temp workdir: %w", err)
 	}
 	defer os.RemoveAll(workDir)
 
 	mainFile := filepath.Join(workDir, "main.go")
 	if err := os.WriteFile(mainFile, []byte(job.SourceCode), 0644); err != nil {
-		return fmt.Errorf("write source file: %w", err)
+		return nil, fmt.Errorf("write source file: %w", err)
 	}
 
 	memoryMB := job.Limits.MemoryMB
@@ -40,11 +55,11 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) error {
 		memoryMB = s.cfg.JudgeDefaultMemoryMB
 	}
 
-	_, err = s.executor.Execute(ctx, sandbox.ExecuteRequest{
+	execResult, err := s.executor.Execute(ctx, sandbox.ExecuteRequest{
 		JobID:       job.ID,
 		Image:       s.cfg.JudgeGoImage,
 		WorkDirHost: workDir,
-		Command:     []string{"sh", "-c", "go run /workspace/main.go"},
+		Command:     []string{"sh", "-c", "go run main.go"},
 
 		CPUCount:    s.cfg.JudgeCPUCount,
 		MemoryMB:    memoryMB,
@@ -57,8 +72,53 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) error {
 		TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
 	})
 	if err != nil {
-		return fmt.Errorf("execute sandbox: %w", err)
+		return nil, fmt.Errorf("execute sandbox: %w", err)
 	}
 
-	return nil
+	result := &RunResult{
+		ExitCode:   execResult.ExitCode,
+		Stdout:     execResult.Stdout,
+		Stderr:     execResult.Stderr,
+		DurationMS: execResult.DurationMS,
+		TotalTests:  len(job.Tests),
+	}
+
+	if execResult.ExitCode != 0 {
+		result.Verdict = "runtime_error"
+		result.PassedTests = 0
+		result.Score = 0
+		result.ErrorMessage = "program exited with non-zero exit code"
+		return result, nil
+	}
+
+	result.PassedTests, result.Score = evaluateTests(execResult.Stdout, job.Tests)
+
+	if result.PassedTests == result.TotalTests {
+		result.Verdict = "accepted"
+	} else {
+		result.Verdict = "wrong_answer"
+	}
+
+	return result, nil
+}
+
+func evaluateTests(stdout string, tests []jobs.TestCase) (passed int, score int) {
+	for _, test := range tests {
+		expected := normalizeOutput(test.ExpectedOutput)
+		actual := normalizeOutput(stdout)
+
+		if actual == expected {
+			passed++
+			score += test.Points
+		}
+	}
+
+	return passed, score
+}
+
+func normalizeOutput(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.TrimSpace(value)
+
+	return value
 }

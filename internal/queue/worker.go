@@ -2,24 +2,33 @@ package queue
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
+	"code-fight-judge/internal/callback"
 	"code-fight-judge/internal/runner"
 	"code-fight-judge/internal/storage"
 )
 
 type Worker struct {
-	repo          *storage.JobsRepo
-	runner        *runner.Service
-	pollInterval  time.Duration
+	repo           *storage.JobsRepo
+	runner         *runner.Service
+	callbackClient *callback.Client
+	pollInterval   time.Duration
 }
 
-func NewWorker(repo *storage.JobsRepo, runner *runner.Service, pollInterval time.Duration) *Worker {
+func NewWorker(
+	repo *storage.JobsRepo,
+	runner *runner.Service,
+	callbackClient *callback.Client,
+	pollInterval time.Duration,
+) *Worker {
 	return &Worker{
-		repo:         repo,
-		runner:       runner,
-		pollInterval: pollInterval,
+		repo:           repo,
+		runner:         runner,
+		callbackClient: callbackClient,
+		pollInterval:   pollInterval,
 	}
 }
 
@@ -28,25 +37,22 @@ func (w *Worker) Run(ctx context.Context) {
 	defer ticker.Stop()
 
 	for {
-		if err := w.processOne(ctx); err != nil {
-			log.Printf("worker process error: %v", err)
-		}
-
 		select {
 		case <-ctx.Done():
-			log.Printf("worker stopped")
 			return
+
 		case <-ticker.C:
-		default:
-			time.Sleep(300 * time.Millisecond)
+			if err := w.processOne(ctx); err != nil {
+				log.Printf("worker process job error: %v", err)
+			}
 		}
 	}
 }
 
 func (w *Worker) processOne(ctx context.Context) error {
-	job, err := w.repo.ClaimNextQueued(ctx)
+	job, err := w.repo.PickQueued(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("pick queued job: %w", err)
 	}
 	if job == nil {
 		return nil
@@ -54,22 +60,116 @@ func (w *Worker) processOne(ctx context.Context) error {
 
 	log.Printf("worker picked job id=%s submission_id=%s", job.ID, job.SubmissionID)
 
-	runCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
+	result, runErr := w.runner.Run(ctx, job)
 
-	if err := w.runner.Run(runCtx, job); err != nil {
-		log.Printf("worker run failed job id=%s: %v", job.ID, err)
-		if markErr := w.repo.MarkFailed(ctx, job.ID); markErr != nil {
-			log.Printf("worker mark failed error job id=%s: %v", job.ID, markErr)
+	if runErr != nil {
+		log.Printf("worker run failed job id=%s error=%v", job.ID, runErr)
+
+		callbackErr := w.callbackClient.SendResult(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
+			JudgeSubmissionID: job.ID,
+			JudgeStatus:       "finished",
+
+			Verdict: "internal_error",
+
+			PassedTests: 0,
+			TotalTests:  len(job.Tests),
+			Score:       0,
+
+			ExitCode: -1,
+
+			CompileLog:      "",
+			StdoutTruncated: "",
+			StderrTruncated: "",
+
+			RunTimeMS:    0,
+			PeakMemoryKB: 0,
+
+			ErrorMessage: runErr.Error(),
+		})
+		if callbackErr != nil {
+			return fmt.Errorf("send internal error callback: %w", callbackErr)
 		}
+
+		if err := w.repo.MarkFinished(ctx, job.ID); err != nil {
+			return fmt.Errorf("mark job finished: %w", err)
+		}
+
 		return nil
+	}
+
+	callbackErr := w.callbackClient.SendResult(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
+		JudgeSubmissionID: job.ID,
+		SubmissionID:      job.SubmissionID,
+		JudgeStatus:       "finished",
+
+		Verdict:      stringPtr(result.Verdict),
+		ErrorMessage: nullableString(result.ErrorMessage),
+
+		PassedTests: result.PassedTests,
+		TotalTests:  result.TotalTests,
+		Score:       result.Score,
+
+		CompileTimeMs: nil,
+		RunTimeMs:     int64ToIntPtr(result.DurationMS),
+		PeakMemoryKb: intPtr(0),
+		ExitCode:     intPtr(result.ExitCode),
+
+		CompileLog:      stringPtr(""),
+		StdoutTruncated: stringPtr(truncateString(result.Stdout, job.Limits.OutputKB*1024)),
+		StderrTruncated: stringPtr(truncateString(result.Stderr, job.Limits.OutputKB*1024)),
+
+		StartedAt:  nil,
+		FinishedAt: nil,
+		Tests:      []callback.TestResult{},
+	})
+	if callbackErr != nil {
+		return fmt.Errorf("send callback: %w", callbackErr)
 	}
 
 	if err := w.repo.MarkFinished(ctx, job.ID); err != nil {
-		log.Printf("worker mark finished error job id=%s: %v", job.ID, err)
-		return nil
+		return fmt.Errorf("mark job finished: %w", err)
 	}
 
-	log.Printf("worker finished job id=%s", job.ID)
+	log.Printf(
+		"worker finished job id=%s verdict=%s passed=%d/%d score=%d",
+		job.ID,
+		result.Verdict,
+		result.PassedTests,
+		result.TotalTests,
+		result.Score,
+	)
+
 	return nil
+}
+
+func truncateString(value string, limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+
+	if len(value) <= limit {
+		return value
+	}
+
+	return value[:limit]
+}
+
+func stringPtr(v string) *string {
+	return &v
+}
+
+func intPtr(v int) *int {
+	return &v
+}
+
+func int64ToIntPtr(v int64) *int {
+	n := int(v)
+	return &n
+}
+
+func nullableString(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
 }
