@@ -12,6 +12,7 @@ import (
 	apphttp "code-fight-judge/internal/http"
 	"code-fight-judge/internal/queue"
 	"code-fight-judge/internal/runner"
+	"code-fight-judge/internal/sandbox"
 	"code-fight-judge/internal/storage"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -42,7 +43,18 @@ func New() (*App, error) {
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo)
 	router := apphttp.NewRouter(cfg, jobsHandler)
 
-	runnerSvc := runner.NewService()
+	executor := sandbox.NewRunscExecutor(sandbox.RunscExecutorConfig{
+		WorkDir:        cfg.JudgeWorkDir,
+		Runtime:        cfg.JudgeRuntime,
+		Image:          cfg.JudgeGoImage,
+		TimeoutSeconds: cfg.JudgeTimeoutSeconds,
+		MemoryLimit:    cfg.JudgeMemoryLimit,
+		CPULimit:       cfg.JudgeCPULimit,
+	})
+
+	executor := sandbox.NewRunscExecutor()
+
+	runnerSvc := runner.NewService(cfg, executor)
 	worker := queue.NewWorker(jobsRepo, runnerSvc, 2*time.Second)
 
 	server := &http.Server{

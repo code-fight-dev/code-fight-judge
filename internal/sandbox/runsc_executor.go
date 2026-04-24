@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -35,40 +36,49 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		runtimeName = "runsc"
 	}
 
-	args := []string{"run", "--rm", "--runtime=" + runtimeName}
+	containerName := buildContainerName(req.JobID)
 
-	containerName := "judge-run"
-	if req.JobID != "" {
-		jobID := req.JobID
-		if len(jobID) > 12 {
-			jobID = jobID[:12]
-		}
-		containerName = "judge-" + jobID
+	args := []string{
+		"run",
+		"--rm",
+		"--runtime=" + runtimeName,
+		"--name", containerName,
+		"--security-opt", "no-new-privileges",
 	}
-	args = append(args, "--name", containerName)
 
 	if req.NetworkNone {
 		args = append(args, "--network", "none")
 	}
+
 	if req.CPUCount > 0 {
 		args = append(args, "--cpus", strconv.FormatFloat(req.CPUCount, 'f', -1, 64))
 	}
+
 	if req.MemoryMB > 0 {
 		args = append(args, "--memory", fmt.Sprintf("%dm", req.MemoryMB))
 	}
+
 	if req.PidsLimit > 0 {
 		args = append(args, "--pids-limit", strconv.Itoa(req.PidsLimit))
 	}
+
 	if req.ReadOnlyRoot {
 		args = append(args, "--read-only")
 	}
+
 	if req.TmpfsSizeMB > 0 {
 		args = append(args, "--tmpfs", fmt.Sprintf("/tmp:size=%dm", req.TmpfsSizeMB))
+	} else {
+		args = append(args, "--tmpfs", "/tmp:size=64m")
 	}
 
 	args = append(args,
-		"--security-opt", "no-new-privileges",
-		"-v", fmt.Sprintf("%s:/workspace:rw", filepath.Clean(req.WorkDirHost)),
+		"--tmpfs", "/gocache:size=128m",
+		"-e", "GOCACHE=/gocache",
+	)
+
+	args = append(args,
+		"-v", fmt.Sprintf("%s:/workspace:ro", filepath.Clean(req.WorkDirHost)),
 		"-w", "/workspace",
 	)
 
@@ -85,18 +95,33 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
+
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
 	duration := time.Since(started).Milliseconds()
 
+	if ctx.Err() != nil {
+		_ = e.forceRemoveContainer(containerName)
+
+		return &ExecuteResult{
+			ExitCode:   -1,
+			Stdout:     stdout.String(),
+			Stderr:     stderr.String(),
+			DurationMS: duration,
+		}, nil
+	}
+
 	exitCode := 0
+
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
+			_ = e.forceRemoveContainer(containerName)
+
 			return nil, fmt.Errorf(
 				"sandbox execute: docker run failed: %w; args=%v; stderr=%s",
 				err,
@@ -112,4 +137,49 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		Stderr:     stderr.String(),
 		DurationMS: duration,
 	}, nil
+}
+
+func buildContainerName(jobID string) string {
+	suffix := strings.TrimSpace(jobID)
+
+	if suffix == "" {
+		suffix = strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+
+	suffix = sanitizeContainerNameSuffix(suffix)
+
+	if len(suffix) > 24 {
+		suffix = suffix[:24]
+	}
+
+	return "judge-" + suffix
+}
+
+func sanitizeContainerNameSuffix(value string) string {
+	var b strings.Builder
+
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' ||
+			r >= 'A' && r <= 'Z' ||
+			r >= '0' && r <= '9' ||
+			r == '-' ||
+			r == '_' {
+			b.WriteRune(r)
+		}
+	}
+
+	if b.Len() == 0 {
+		return strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+
+	return b.String()
+}
+
+func (e *RunscExecutor) forceRemoveContainer(containerName string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, e.dockerBin, "rm", "-f", containerName)
+
+	return cmd.Run()
 }

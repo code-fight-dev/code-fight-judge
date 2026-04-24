@@ -1,24 +1,24 @@
 package main
 
 import (
-	"context"
 	"log"
-	"os/signal"
-	"syscall"
 
 	"code-fight-judge/internal/app"
+	"code-fight-judge/internal/config"
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
-	application, err := app.New()
+	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("app init failed: %v", err)
+		log.Fatal(err)
 	}
 
-	if err := application.Run(ctx); err != nil {
-		log.Fatalf("app run failed: %v", err)
+	application, err := app.New(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := application.Run(); err != nil {
+		log.Fatal(err)
 	}
 }
