@@ -66,14 +66,16 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		args = append(args, "--read-only")
 	}
 
-	if req.TmpfsSizeMB > 0 {
-		args = append(args, "--tmpfs", fmt.Sprintf("/tmp:size=%dm", req.TmpfsSizeMB))
-	} else {
-		args = append(args, "--tmpfs", "/tmp:size=64m")
+	tmpfsSizeMB := req.TmpfsSizeMB
+	if tmpfsSizeMB <= 0 {
+		tmpfsSizeMB = 256
 	}
 
 	args = append(args,
-		"--tmpfs", "/gocache:size=128m",
+		"--tmpfs", fmt.Sprintf("/tmp:exec,size=%dm", tmpfsSizeMB),
+		"--tmpfs", "/gocache:exec,size=256m",
+		"-e", "TMPDIR=/tmp",
+		"-e", "GOTMPDIR=/tmp",
 		"-e", "GOCACHE=/gocache",
 	)
 
