@@ -45,6 +45,10 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 	}
 	defer os.RemoveAll(workDir)
 
+	if err := os.Chmod(workDir, 0755); err != nil {
+		return nil, fmt.Errorf("chmod workdir: %w", err)
+	}
+
 	mainFile := filepath.Join(workDir, "main.go")
 	if err := os.WriteFile(mainFile, []byte(job.SourceCode), 0644); err != nil {
 		return nil, fmt.Errorf("write source file: %w", err)
