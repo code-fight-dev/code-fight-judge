@@ -78,7 +78,7 @@ func validateSubmitRequest(req jobs.SubmitRequest) error {
 	}
 
 	for i, test := range req.Tests {
-		if test.ID <= 0 {
+		if strings.TrimSpace(test.ID) == "" {
 			return errors.New("tests[" + itoa(i) + "].id must be > 0")
 		}
 		if test.Points < 0 {

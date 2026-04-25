@@ -158,7 +158,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 	for _, test := range job.Tests {
 		runResult, err := s.executor.Execute(ctx, sandbox.ExecuteRequest{
-			JobID:         fmt.Sprintf("%s-test-%d", job.ID, test.ID),
+			JobID: 		   fmt.Sprintf("%s-test-%s", job.ID, test.ID),
 			Image:         s.cfg.JudgeGoImage,
 			WorkDirHost:   workspaceDir,
 			OutputDirHost: outputDir,
@@ -186,7 +186,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		result.RunTimeMS += int(runResult.DurationMS)
 
 		testResult := TestResult{
-			TestCaseID: fmt.Sprintf("%d", test.ID),
+			TestCaseID: test.ID,
 			TimeMS:     int(runResult.DurationMS),
 			MemoryKB:   0,
 			ExitCode:   runResult.ExitCode,
