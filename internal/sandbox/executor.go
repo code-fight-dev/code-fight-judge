@@ -10,15 +10,18 @@ type ExecuteRequest struct {
 	JobID         string
 	Image         string
 	WorkDirHost   string
+	OutputDirHost string
 	Command       []string
 	Env           map[string]string
-	CPUCount      float64
-	MemoryMB      int
-	PidsLimit     int
-	ReadOnlyRoot  bool
-	NetworkNone   bool
-	TmpfsSizeMB   int
-	RuntimeName   string
+	Stdin         string
+
+	CPUCount     float64
+	MemoryMB     int
+	PidsLimit    int
+	ReadOnlyRoot bool
+	NetworkNone  bool
+	TmpfsSizeMB  int
+	RuntimeName  string
 }
 
 type ExecuteResult struct {

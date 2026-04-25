@@ -27,6 +27,9 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	if req.WorkDirHost == "" {
 		return nil, fmt.Errorf("sandbox execute: work_dir_host is required")
 	}
+	if req.OutputDirHost == "" {
+		return nil, fmt.Errorf("sandbox execute: output_dir_host is required")
+	}
 	if len(req.Command) == 0 {
 		return nil, fmt.Errorf("sandbox execute: command is required")
 	}
@@ -81,6 +84,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 
 	args = append(args,
 		"-v", fmt.Sprintf("%s:/workspace:ro", filepath.Clean(req.WorkDirHost)),
+		"-v", fmt.Sprintf("%s:/output:rw", filepath.Clean(req.OutputDirHost)),
 		"-w", "/workspace",
 	)
 
@@ -100,6 +104,10 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+
+	if req.Stdin != "" {
+		cmd.Stdin = strings.NewReader(req.Stdin)
+	}
 
 	err := cmd.Run()
 	duration := time.Since(started).Milliseconds()
