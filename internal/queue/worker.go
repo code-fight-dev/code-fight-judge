@@ -77,7 +77,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 			TotalTests:  len(job.Tests),
 			Score:       0,
 
-			CompileTimeMs: nil,
+			RunTimeMs:     intPtr(0),
 			RunTimeMs:     intPtr(0),
 			PeakMemoryKb:  intPtr(0),
 			ExitCode:      intPtr(-1),
@@ -114,7 +114,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 		TotalTests:  result.TotalTests,
 		Score:       result.Score,
 
-		CompileTimeMs: nil,
+		CompileTimeMs: intPtr(result.CompileTimeMS),
 		RunTimeMs:     int64ToIntPtr(result.DurationMS),
 		PeakMemoryKb:  intPtr(0),
 		ExitCode:      intPtr(result.ExitCode),

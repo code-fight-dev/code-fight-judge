@@ -30,6 +30,9 @@ type RunResult struct {
 	Stderr     string
 	DurationMS int64
 
+	CompileTimeMS int
+	RunTimeMS     int
+
 	Verdict     string
 	PassedTests int
 	TotalTests  int
@@ -123,24 +126,29 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 	if compileResult.ExitCode != 0 {
 		return &RunResult{
-			ExitCode:     compileResult.ExitCode,
-			Stdout:       compileResult.Stdout,
-			Stderr:       compileResult.Stderr,
-			DurationMS:   compileResult.DurationMS,
-			Verdict:      "compile_error",
-			PassedTests:  0,
-			TotalTests:   totalTests,
-			Score:        0,
-			ErrorMessage: "compile failed",
-			TestResults:  []TestResult{},
+			ExitCode:      compileResult.ExitCode,
+			Stdout:        compileResult.Stdout,
+			Stderr:        compileResult.Stderr,
+			DurationMS:    compileResult.DurationMS,
+			CompileTimeMS: int(compileResult.DurationMS),
+			RunTimeMS:      0,
+			Verdict:       "compile_error",
+			PassedTests:   0,
+			TotalTests:    totalTests,
+			Score:         0,
+			ErrorMessage:  "compile failed",
+			TestResults:   []TestResult{},
 		}, nil
 	}
 
 	result := &RunResult{
-		ExitCode:    0,
-		Stdout:      "",
-		Stderr:      "",
-		DurationMS:  compileResult.DurationMS,
+		ExitCode:      0,
+		Stdout:        "",
+		Stderr:        "",
+		DurationMS:    compileResult.DurationMS,
+		CompileTimeMS: int(compileResult.DurationMS),
+		RunTimeMS:      0,
+
 		Verdict:     "accepted",
 		PassedTests: 0,
 		TotalTests:  totalTests,
@@ -175,6 +183,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		result.Stderr = runResult.Stderr
 		result.ExitCode = runResult.ExitCode
 		result.DurationMS += runResult.DurationMS
+		result.RunTimeMS += int(runResult.DurationMS)
 
 		testResult := TestResult{
 			TestCaseID: fmt.Sprintf("%d", test.ID),
