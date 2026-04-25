@@ -60,7 +60,11 @@ func (w *Worker) processOne(ctx context.Context) error {
 
 	log.Printf("worker picked job id=%s submission_id=%s", job.ID, job.SubmissionID)
 
+	startedAt := time.Now().UTC()
+
 	result, runErr := w.runner.Run(ctx, job)
+
+	finishedAt := time.Now().UTC()
 
 	if runErr != nil {
 		log.Printf("worker run failed job id=%s error=%v", job.ID, runErr)
@@ -86,8 +90,8 @@ func (w *Worker) processOne(ctx context.Context) error {
 			StdoutTruncated: stringPtr(""),
 			StderrTruncated: stringPtr(""),
 
-			StartedAt:  nil,
-			FinishedAt: nil,
+			StartedAt:  &startedAt,
+			FinishedAt: &finishedAt,
 			Tests:      []callback.TestResult{},
 		})
 		if callbackErr != nil {
@@ -115,7 +119,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 		Score:       result.Score,
 
 		CompileTimeMs: intPtr(result.CompileTimeMS),
-		RunTimeMs:     int64ToIntPtr(result.DurationMS),
+		RunTimeMs: intPtr(result.RunTimeMS),
 		PeakMemoryKb:  intPtr(0),
 		ExitCode:      intPtr(result.ExitCode),
 
@@ -123,9 +127,9 @@ func (w *Worker) processOne(ctx context.Context) error {
 		StdoutTruncated: stringPtr(truncateString(result.Stdout, job.Limits.OutputKB*1024)),
 		StderrTruncated: stringPtr(truncateString(result.Stderr, job.Limits.OutputKB*1024)),
 
-		StartedAt:  nil,
-		FinishedAt: nil,
-		Tests:      []callback.TestResult{},
+		StartedAt:  &startedAt,
+		FinishedAt: &finishedAt,
+		Tests: toCallbackTests(result.TestResults),
 	})
 	if callbackErr != nil {
 		_ = w.repo.MarkFailed(ctx, job.ID)
@@ -179,4 +183,21 @@ func nullableString(v string) *string {
 	}
 
 	return &v
+}
+
+func toCallbackTests(results []runner.TestResult) []callback.TestResult {
+	out := make([]callback.TestResult, 0, len(results))
+
+	for _, r := range results {
+		out = append(out, callback.TestResult{
+			TestCaseID:     r.TestCaseID,
+			Status:         r.Status,
+			TimeMs:         intPtr(r.TimeMS),
+			MemoryKb:       intPtr(r.MemoryKB),
+			ExitCode:       intPtr(r.ExitCode),
+			CheckerMessage: nullableString(r.CheckerMessage),
+		})
+	}
+
+	return out
 }
