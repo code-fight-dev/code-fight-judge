@@ -331,9 +331,18 @@ func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID strin
 				}
 			}
 
-			monitor.readStats(stdout)
+			samples := monitor.readStats(stdout)
 			_ = cmd.Wait()
-			return
+
+			if samples > 0 {
+				return
+			}
+
+			select {
+			case <-monitorCtx.Done():
+				return
+			case <-time.After(25 * time.Millisecond):
+			}
 		}
 	}()
 
@@ -350,8 +359,9 @@ func (m *statsMonitor) Stop() int {
 	return m.peakKB
 }
 
-func (m *statsMonitor) readStats(r io.Reader) {
+func (m *statsMonitor) readStats(r io.Reader) int {
 	scanner := bufio.NewScanner(r)
+	samples := 0
 
 	for scanner.Scan() {
 		memoryKB, err := parseDockerMemoryUsageKB(scanner.Text())
@@ -359,12 +369,16 @@ func (m *statsMonitor) readStats(r io.Reader) {
 			continue
 		}
 
+		samples++
+
 		m.mu.Lock()
 		if memoryKB > m.peakKB {
 			m.peakKB = memoryKB
 		}
 		m.mu.Unlock()
 	}
+
+	return samples
 }
 
 func (e *RunscExecutor) maxObservedMemoryKB(containerID string, statsPeakKB int) int {
