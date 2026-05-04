@@ -127,6 +127,24 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		return nil, fmt.Errorf("compile sandbox: %w", err)
 	}
 
+	if compileResult.OOMKilled || compileResult.ExitCode == 137 {
+		return &RunResult{
+			ExitCode:      compileResult.ExitCode,
+			Stdout:        compileResult.Stdout,
+			Stderr:        compileResult.Stderr,
+			DurationMS:    compileResult.DurationMS,
+			CompileTimeMS: int(compileResult.DurationMS),
+			RunTimeMS:     0,
+			PeakMemoryKB:  0,
+			Verdict:       "memory_limit_exceeded",
+			PassedTests:   0,
+			TotalTests:    totalTests,
+			Score:         0,
+			ErrorMessage:  "memory limit exceeded",
+			TestResults:   []TestResult{},
+		}, nil
+	}
+
 	if compileResult.ExitCode != 0 {
 		return &RunResult{
 			ExitCode:      compileResult.ExitCode,
