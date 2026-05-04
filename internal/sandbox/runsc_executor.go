@@ -481,7 +481,7 @@ func readMemoryFileKB(path string) (int, error) {
 }
 
 func parseDockerMemoryUsageKB(value string) (int, error) {
-	used := strings.TrimSpace(value)
+	used := strings.TrimSpace(stripANSIEscapeSequences(value))
 	if idx := strings.Index(used, "/"); idx >= 0 {
 		used = strings.TrimSpace(used[:idx])
 	}
@@ -491,6 +491,32 @@ func parseDockerMemoryUsageKB(value string) (int, error) {
 	}
 
 	return parseDockerBytesToKB(used)
+}
+
+func stripANSIEscapeSequences(value string) string {
+	var b strings.Builder
+
+	for i := 0; i < len(value); i++ {
+		if value[i] == 0x1b && i+1 < len(value) && value[i+1] == '[' {
+			i += 2
+			for i < len(value) {
+				ch := value[i]
+				if ch >= '@' && ch <= '~' {
+					break
+				}
+				i++
+			}
+			continue
+		}
+
+		if value[i] < 0x20 && value[i] != '\t' && value[i] != '\n' && value[i] != '\r' {
+			continue
+		}
+
+		b.WriteByte(value[i])
+	}
+
+	return b.String()
 }
 
 func parseDockerBytesToKB(value string) (int, error) {

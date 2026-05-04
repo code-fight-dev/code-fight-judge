@@ -28,6 +28,11 @@ func TestParseDockerMemoryUsageKB(t *testing.T) {
 			in:   "0.5GiB / 2GiB",
 			want: 524288,
 		},
+		{
+			name: "ansi escape prefix",
+			in:   "\x1b[2J\x1b[H44.3MiB / 1GiB",
+			want: 45364,
+		},
 	}
 
 	for _, tt := range tests {
