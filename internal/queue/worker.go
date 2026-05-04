@@ -119,8 +119,8 @@ func (w *Worker) processOne(ctx context.Context) error {
 		Score:       result.Score,
 
 		CompileTimeMs: intPtr(result.CompileTimeMS),
-		RunTimeMs: intPtr(result.RunTimeMS),
-		PeakMemoryKb:  intPtr(0),
+		RunTimeMs:     intPtr(result.RunTimeMS),
+		PeakMemoryKb:  intPtr(result.PeakMemoryKB),
 		ExitCode:      intPtr(result.ExitCode),
 
 		CompileLog:      stringPtr(""),

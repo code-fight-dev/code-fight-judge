@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"code-fight-judge/internal/config"
 	"code-fight-judge/internal/jobs"
@@ -32,6 +33,7 @@ type RunResult struct {
 
 	CompileTimeMS int
 	RunTimeMS     int
+	PeakMemoryKB  int
 
 	Verdict     string
 	PassedTests int
@@ -94,6 +96,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			Stdout:       "",
 			Stderr:       "",
 			DurationMS:   0,
+			PeakMemoryKB: 0,
 			Verdict:      "system_error",
 			PassedTests:  0,
 			TotalTests:   0,
@@ -132,6 +135,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			DurationMS:    compileResult.DurationMS,
 			CompileTimeMS: int(compileResult.DurationMS),
 			RunTimeMS:      0,
+			PeakMemoryKB:  compileResult.PeakMemoryKB,
 			Verdict:       "compile_error",
 			PassedTests:   0,
 			TotalTests:    totalTests,
@@ -148,6 +152,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		DurationMS:    compileResult.DurationMS,
 		CompileTimeMS: int(compileResult.DurationMS),
 		RunTimeMS:      0,
+		PeakMemoryKB:  compileResult.PeakMemoryKB,
 
 		Verdict:     "accepted",
 		PassedTests: 0,
@@ -158,7 +163,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 	for _, test := range job.Tests {
 		runResult, err := s.executor.Execute(ctx, sandbox.ExecuteRequest{
-			JobID: 		   fmt.Sprintf("%s-test-%s", job.ID, test.ID),
+			JobID:         fmt.Sprintf("%s-test-%s", job.ID, test.ID),
 			Image:         s.cfg.JudgeGoImage,
 			WorkDirHost:   workspaceDir,
 			OutputDirHost: outputDir,
@@ -174,6 +179,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			ReadOnlyRoot: false,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
+			Timeout:      time.Duration(job.Limits.TimeMS) * time.Millisecond,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("run test sandbox: %w", err)
@@ -184,12 +190,24 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		result.ExitCode = runResult.ExitCode
 		result.DurationMS += runResult.DurationMS
 		result.RunTimeMS += int(runResult.DurationMS)
+		result.PeakMemoryKB = maxInt(result.PeakMemoryKB, runResult.PeakMemoryKB)
 
 		testResult := TestResult{
 			TestCaseID: test.ID,
 			TimeMS:     int(runResult.DurationMS),
-			MemoryKB:   0,
+			MemoryKB:   runResult.PeakMemoryKB,
 			ExitCode:   runResult.ExitCode,
+		}
+
+		if runResult.TimedOut {
+			testResult.Status = "time_limit_exceeded"
+			testResult.CheckerMessage = "time limit exceeded"
+
+			result.Verdict = "time_limit_exceeded"
+			result.ErrorMessage = "time limit exceeded"
+			result.TestResults = append(result.TestResults, testResult)
+
+			break
 		}
 
 		if runResult.ExitCode != 0 {
@@ -228,4 +246,12 @@ func normalizeOutput(value string) string {
 	value = strings.TrimSpace(value)
 
 	return value
+}
+
+func maxInt(left, right int) int {
+	if left > right {
+		return left
+	}
+
+	return right
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -106,33 +107,74 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	}
 	defer e.forceRemoveContainer(containerName)
 
-	if err := e.startContainer(ctx, containerID, req.Stdin); err != nil {
-		duration := time.Since(started).Milliseconds()
-		stdout, stderr := e.readContainerLogs(context.Background(), containerID)
+	var runCtx context.Context
+	var cancel context.CancelFunc
+	if req.Timeout > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, req.Timeout)
+	} else {
+		runCtx, cancel = context.WithCancel(ctx)
+	}
 
-		if ctx.Err() != nil {
+	forceDone := make(chan struct{})
+	stopForce := make(chan struct{})
+	go func() {
+		defer close(forceDone)
+
+		select {
+		case <-runCtx.Done():
+			_ = e.forceKillContainer(containerName)
+		case <-stopForce:
+		}
+	}()
+	defer func() {
+		if runCtx.Err() == nil {
+			close(stopForce)
+		}
+		cancel()
+		<-forceDone
+	}()
+
+	monitor := e.startStatsMonitor(runCtx, containerID)
+
+	if err := e.startContainer(runCtx, containerID, req.Stdin); err != nil {
+		duration := time.Since(started).Milliseconds()
+		if runCtx.Err() != nil {
+			<-forceDone
+		}
+		stdout, stderr := e.readContainerLogs(context.Background(), containerID)
+		peakMemoryKB := monitor.Stop()
+
+		if runCtx.Err() != nil {
 			return &ExecuteResult{
-				ExitCode:   -1,
-				Stdout:     stdout,
-				Stderr:     stderr,
-				DurationMS: duration,
+				ExitCode:     -1,
+				Stdout:       stdout,
+				Stderr:       stderr,
+				DurationMS:   duration,
+				PeakMemoryKB: peakMemoryKB,
+				TimedOut:     errors.Is(runCtx.Err(), context.DeadlineExceeded),
 			}, nil
 		}
 
 		return nil, err
 	}
 
-	exitCode, err := e.waitContainer(ctx, containerID)
+	exitCode, err := e.waitContainer(runCtx, containerID)
 	duration := time.Since(started).Milliseconds()
+	if err != nil && runCtx.Err() != nil {
+		<-forceDone
+	}
 	stdout, stderr := e.readContainerLogs(context.Background(), containerID)
+	peakMemoryKB := monitor.Stop()
 
 	if err != nil {
-		if ctx.Err() != nil {
+		if runCtx.Err() != nil {
 			return &ExecuteResult{
-				ExitCode:   -1,
-				Stdout:     stdout,
-				Stderr:     stderr,
-				DurationMS: duration,
+				ExitCode:     -1,
+				Stdout:       stdout,
+				Stderr:       stderr,
+				DurationMS:   duration,
+				PeakMemoryKB: peakMemoryKB,
+				TimedOut:     errors.Is(runCtx.Err(), context.DeadlineExceeded),
 			}, nil
 		}
 
@@ -140,10 +182,11 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	}
 
 	return &ExecuteResult{
-		ExitCode:   exitCode,
-		Stdout:     stdout,
-		Stderr:     stderr,
-		DurationMS: duration,
+		ExitCode:     exitCode,
+		Stdout:       stdout,
+		Stderr:       stderr,
+		DurationMS:   duration,
+		PeakMemoryKB: peakMemoryKB,
 	}, nil
 }
 
@@ -245,6 +288,135 @@ func (e *RunscExecutor) readContainerLogs(ctx context.Context, containerID strin
 	return stdout.String(), stderr.String()
 }
 
+type statsMonitor struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+	mu     sync.Mutex
+	peakKB int
+}
+
+func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID string) *statsMonitor {
+	monitorCtx, cancel := context.WithCancel(ctx)
+	monitor := &statsMonitor{
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+
+	go func() {
+		defer close(monitor.done)
+
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			monitor.sample(e, containerID)
+
+			select {
+			case <-monitorCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
+	return monitor
+}
+
+func (m *statsMonitor) Stop() int {
+	m.cancel()
+	<-m.done
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.peakKB
+}
+
+func (m *statsMonitor) sample(e *RunscExecutor, containerID string) {
+	memoryKB, err := e.readMemoryUsageKB(containerID)
+	if err != nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if memoryKB > m.peakKB {
+		m.peakKB = memoryKB
+	}
+}
+
+func (e *RunscExecutor) readMemoryUsageKB(containerID string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	var stdout bytes.Buffer
+	cmd := exec.CommandContext(
+		ctx,
+		e.dockerBin,
+		"stats",
+		"--no-stream",
+		"--format", "{{.MemUsage}}",
+		containerID,
+	)
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		return 0, err
+	}
+
+	return parseDockerMemoryUsageKB(stdout.String())
+}
+
+func parseDockerMemoryUsageKB(value string) (int, error) {
+	used := strings.TrimSpace(value)
+	if idx := strings.Index(used, "/"); idx >= 0 {
+		used = strings.TrimSpace(used[:idx])
+	}
+
+	if used == "" {
+		return 0, fmt.Errorf("empty docker memory usage")
+	}
+
+	return parseDockerBytesToKB(used)
+}
+
+func parseDockerBytesToKB(value string) (int, error) {
+	value = strings.TrimSpace(value)
+
+	unitStart := len(value)
+	for i, r := range value {
+		if (r < '0' || r > '9') && r != '.' {
+			unitStart = i
+			break
+		}
+	}
+
+	numberText := strings.TrimSpace(value[:unitStart])
+	unit := strings.ToLower(strings.TrimSpace(value[unitStart:]))
+
+	number, err := strconv.ParseFloat(numberText, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	multiplier := float64(1)
+	switch unit {
+	case "b", "":
+		multiplier = 1
+	case "kb", "kib":
+		multiplier = 1024
+	case "mb", "mib":
+		multiplier = 1024 * 1024
+	case "gb", "gib":
+		multiplier = 1024 * 1024 * 1024
+	default:
+		return 0, fmt.Errorf("unknown docker memory unit %q", unit)
+	}
+
+	return int((number*multiplier + 1023) / 1024), nil
+}
+
 func isExitError(err error) bool {
 	var exitErr *exec.ExitError
 	return errors.As(err, &exitErr)
@@ -291,6 +463,15 @@ func (e *RunscExecutor) forceRemoveContainer(containerName string) error {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, e.dockerBin, "rm", "-f", containerName)
+
+	return cmd.Run()
+}
+
+func (e *RunscExecutor) forceKillContainer(containerName string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, e.dockerBin, "kill", containerName)
 
 	return cmd.Run()
 }
