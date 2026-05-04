@@ -127,6 +127,24 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		return nil, fmt.Errorf("compile sandbox: %w", err)
 	}
 
+	if compileResult.OOMKilled || compileResult.ExitCode == 137 {
+		return &RunResult{
+			ExitCode:      compileResult.ExitCode,
+			Stdout:        compileResult.Stdout,
+			Stderr:        compileResult.Stderr,
+			DurationMS:    compileResult.DurationMS,
+			CompileTimeMS: int(compileResult.DurationMS),
+			RunTimeMS:     0,
+			PeakMemoryKB:  0,
+			Verdict:       "memory_limit_exceeded",
+			PassedTests:   0,
+			TotalTests:    totalTests,
+			Score:         0,
+			ErrorMessage:  "memory limit exceeded",
+			TestResults:   []TestResult{},
+		}, nil
+	}
+
 	if compileResult.ExitCode != 0 {
 		return &RunResult{
 			ExitCode:      compileResult.ExitCode,
@@ -205,6 +223,17 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			result.Verdict = "time_limit_exceeded"
 			result.ErrorMessage = "time limit exceeded"
+			result.TestResults = append(result.TestResults, testResult)
+
+			break
+		}
+
+		if runResult.OOMKilled || runResult.ExitCode == 137 {
+			testResult.Status = "memory_limit_exceeded"
+			testResult.CheckerMessage = "memory limit exceeded"
+
+			result.Verdict = "memory_limit_exceeded"
+			result.ErrorMessage = "memory limit exceeded"
 			result.TestResults = append(result.TestResults, testResult)
 
 			break

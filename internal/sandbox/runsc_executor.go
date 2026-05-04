@@ -147,12 +147,14 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		}
 		stdout, stderr := e.readContainerLogs(context.Background(), containerID)
 		peakMemoryKB := e.maxObservedMemoryKB(containerID, monitor.Stop())
+		oomKilled := e.inspectOOMKilled(containerID, -1)
 		log.Printf(
-			"sandbox execute: container finished after start error name=%s id=%s duration_ms=%d peak_memory_kb=%d err=%v ctx_err=%v",
+			"sandbox execute: container finished after start error name=%s id=%s duration_ms=%d peak_memory_kb=%d oom_killed=%t err=%v ctx_err=%v",
 			containerName,
 			containerID,
 			duration,
 			peakMemoryKB,
+			oomKilled,
 			err,
 			runCtx.Err(),
 		)
@@ -165,6 +167,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 				DurationMS:   duration,
 				PeakMemoryKB: peakMemoryKB,
 				TimedOut:     errors.Is(runCtx.Err(), context.DeadlineExceeded),
+				OOMKilled:    oomKilled,
 			}, nil
 		}
 
@@ -178,13 +181,15 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	}
 	stdout, stderr := e.readContainerLogs(context.Background(), containerID)
 	peakMemoryKB := e.maxObservedMemoryKB(containerID, monitor.Stop())
+	oomKilled := e.inspectOOMKilled(containerID, exitCode)
 	log.Printf(
-		"sandbox execute: container finished name=%s id=%s exit_code=%d duration_ms=%d peak_memory_kb=%d wait_err=%v ctx_err=%v",
+		"sandbox execute: container finished name=%s id=%s exit_code=%d duration_ms=%d peak_memory_kb=%d oom_killed=%t wait_err=%v ctx_err=%v",
 		containerName,
 		containerID,
 		exitCode,
 		duration,
 		peakMemoryKB,
+		oomKilled,
 		err,
 		runCtx.Err(),
 	)
@@ -198,6 +203,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 				DurationMS:   duration,
 				PeakMemoryKB: peakMemoryKB,
 				TimedOut:     errors.Is(runCtx.Err(), context.DeadlineExceeded),
+				OOMKilled:    oomKilled,
 			}, nil
 		}
 
@@ -210,6 +216,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		Stderr:       stderr,
 		DurationMS:   duration,
 		PeakMemoryKB: peakMemoryKB,
+		OOMKilled:    oomKilled,
 	}, nil
 }
 
@@ -309,6 +316,40 @@ func (e *RunscExecutor) readContainerLogs(ctx context.Context, containerID strin
 	_ = cmd.Run()
 
 	return stdout.String(), stderr.String()
+}
+
+func (e *RunscExecutor) inspectOOMKilled(containerID string, exitCode int) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := exec.CommandContext(
+		ctx,
+		e.dockerBin,
+		"inspect",
+		"--format", "{{.State.OOMKilled}}",
+		containerID,
+	)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		if exitCode == 137 {
+			log.Printf("sandbox execute: docker inspect oom failed, using exit code fallback container_id=%s err=%v stderr=%s", containerID, err, stderr.String())
+			return true
+		}
+
+		return false
+	}
+
+	oomKilled := strings.TrimSpace(stdout.String()) == "true"
+	if oomKilled || exitCode == 137 {
+		return true
+	}
+
+	return false
 }
 
 type statsMonitor struct {
