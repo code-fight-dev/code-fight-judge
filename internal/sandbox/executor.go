@@ -35,4 +35,5 @@ type ExecuteResult struct {
 	DurationMS   int64
 	PeakMemoryKB int
 	TimedOut     bool
+	OOMKilled    bool
 }

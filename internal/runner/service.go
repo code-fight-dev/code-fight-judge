@@ -210,6 +210,17 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			break
 		}
 
+		if runResult.OOMKilled || runResult.ExitCode == 137 {
+			testResult.Status = "memory_limit_exceeded"
+			testResult.CheckerMessage = "memory limit exceeded"
+
+			result.Verdict = "memory_limit_exceeded"
+			result.ErrorMessage = "memory limit exceeded"
+			result.TestResults = append(result.TestResults, testResult)
+
+			break
+		}
+
 		if runResult.ExitCode != 0 {
 			testResult.Status = "runtime_error"
 			testResult.CheckerMessage = "program exited with non-zero exit code"
