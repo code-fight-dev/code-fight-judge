@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -144,7 +145,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 			<-forceDone
 		}
 		stdout, stderr := e.readContainerLogs(context.Background(), containerID)
-		peakMemoryKB := monitor.Stop()
+		peakMemoryKB := e.maxObservedMemoryKB(containerID, monitor.Stop())
 
 		if runCtx.Err() != nil {
 			return &ExecuteResult{
@@ -166,7 +167,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		<-forceDone
 	}
 	stdout, stderr := e.readContainerLogs(context.Background(), containerID)
-	peakMemoryKB := monitor.Stop()
+	peakMemoryKB := e.maxObservedMemoryKB(containerID, monitor.Stop())
 
 	if err != nil {
 		if runCtx.Err() != nil {
@@ -364,6 +365,66 @@ func (m *statsMonitor) readStats(r io.Reader) {
 		}
 		m.mu.Unlock()
 	}
+}
+
+func (e *RunscExecutor) maxObservedMemoryKB(containerID string, statsPeakKB int) int {
+	cgroupPeakKB, err := e.readCgroupPeakMemoryKB(containerID)
+	if err != nil {
+		return statsPeakKB
+	}
+
+	if cgroupPeakKB > statsPeakKB {
+		return cgroupPeakKB
+	}
+
+	return statsPeakKB
+}
+
+func (e *RunscExecutor) readCgroupPeakMemoryKB(containerID string) (int, error) {
+	fullID := strings.TrimSpace(containerID)
+	if fullID == "" {
+		return 0, fmt.Errorf("empty container id")
+	}
+
+	roots := []string{"/host/sys/fs/cgroup", "/sys/fs/cgroup"}
+	files := []string{
+		filepath.Join("system.slice", "docker-"+fullID+".scope", "memory.peak"),
+		filepath.Join("docker", fullID, "memory.peak"),
+		filepath.Join("memory", "system.slice", "docker-"+fullID+".scope", "memory.max_usage_in_bytes"),
+		filepath.Join("memory", "docker", fullID, "memory.max_usage_in_bytes"),
+		filepath.Join("system.slice", "docker-"+fullID+".scope", "memory.current"),
+		filepath.Join("docker", fullID, "memory.current"),
+	}
+
+	for _, root := range roots {
+		for _, file := range files {
+			value, err := readMemoryFileKB(filepath.Join(root, file))
+			if err == nil && value > 0 {
+				return value, nil
+			}
+		}
+	}
+
+	return 0, fmt.Errorf("container cgroup memory file not found")
+}
+
+func readMemoryFileKB(path string) (int, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "max" {
+		return 0, fmt.Errorf("invalid memory value %q", value)
+	}
+
+	bytesValue, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	return int((bytesValue + 1023) / 1024), nil
 }
 
 func parseDockerMemoryUsageKB(value string) (int, error) {
