@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -108,6 +109,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("sandbox execute: container created name=%s id=%s timeout=%s", containerName, containerID, req.Timeout)
 	defer e.forceRemoveContainer(containerName)
 
 	var runCtx context.Context
@@ -146,6 +148,15 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		}
 		stdout, stderr := e.readContainerLogs(context.Background(), containerID)
 		peakMemoryKB := e.maxObservedMemoryKB(containerID, monitor.Stop())
+		log.Printf(
+			"sandbox execute: container finished after start error name=%s id=%s duration_ms=%d peak_memory_kb=%d err=%v ctx_err=%v",
+			containerName,
+			containerID,
+			duration,
+			peakMemoryKB,
+			err,
+			runCtx.Err(),
+		)
 
 		if runCtx.Err() != nil {
 			return &ExecuteResult{
@@ -168,6 +179,16 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	}
 	stdout, stderr := e.readContainerLogs(context.Background(), containerID)
 	peakMemoryKB := e.maxObservedMemoryKB(containerID, monitor.Stop())
+	log.Printf(
+		"sandbox execute: container finished name=%s id=%s exit_code=%d duration_ms=%d peak_memory_kb=%d wait_err=%v ctx_err=%v",
+		containerName,
+		containerID,
+		exitCode,
+		duration,
+		peakMemoryKB,
+		err,
+		runCtx.Err(),
+	)
 
 	if err != nil {
 		if runCtx.Err() != nil {
@@ -307,6 +328,13 @@ func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID strin
 
 	go func() {
 		defer close(monitor.done)
+		log.Printf("sandbox stats: monitor started container_id=%s", containerID)
+		defer func() {
+			monitor.mu.Lock()
+			peakKB := monitor.peakKB
+			monitor.mu.Unlock()
+			log.Printf("sandbox stats: monitor stopped container_id=%s peak_memory_kb=%d", containerID, peakKB)
+		}()
 
 		for {
 			cmd := exec.CommandContext(
@@ -319,10 +347,12 @@ func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID strin
 
 			stdout, err := cmd.StdoutPipe()
 			if err != nil {
+				log.Printf("sandbox stats: stdout pipe error container_id=%s err=%v", containerID, err)
 				return
 			}
 
 			if err := cmd.Start(); err != nil {
+				log.Printf("sandbox stats: start error container_id=%s err=%v", containerID, err)
 				select {
 				case <-monitorCtx.Done():
 					return
@@ -337,6 +367,7 @@ func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID strin
 			if samples > 0 {
 				return
 			}
+			log.Printf("sandbox stats: empty stats stream container_id=%s", containerID)
 
 			select {
 			case <-monitorCtx.Done():
@@ -366,6 +397,10 @@ func (m *statsMonitor) readStats(r io.Reader) int {
 	for scanner.Scan() {
 		memoryKB, err := parseDockerMemoryUsageKB(scanner.Text())
 		if err != nil {
+			log.Printf("sandbox stats: parse memory usage error raw=%q err=%v", scanner.Text(), err)
+			continue
+		}
+		if memoryKB <= 0 {
 			continue
 		}
 
@@ -374,6 +409,7 @@ func (m *statsMonitor) readStats(r io.Reader) int {
 		m.mu.Lock()
 		if memoryKB > m.peakKB {
 			m.peakKB = memoryKB
+			log.Printf("sandbox stats: new peak memory sample peak_memory_kb=%d", memoryKB)
 		}
 		m.mu.Unlock()
 	}
@@ -384,8 +420,10 @@ func (m *statsMonitor) readStats(r io.Reader) int {
 func (e *RunscExecutor) maxObservedMemoryKB(containerID string, statsPeakKB int) int {
 	cgroupPeakKB, err := e.readCgroupPeakMemoryKB(containerID)
 	if err != nil {
+		log.Printf("sandbox memory: cgroup fallback unavailable container_id=%s stats_peak_kb=%d err=%v", containerID, statsPeakKB, err)
 		return statsPeakKB
 	}
+	log.Printf("sandbox memory: cgroup fallback container_id=%s stats_peak_kb=%d cgroup_peak_kb=%d", containerID, statsPeakKB, cgroupPeakKB)
 
 	if cgroupPeakKB > statsPeakKB {
 		return cgroupPeakKB
@@ -414,6 +452,7 @@ func (e *RunscExecutor) readCgroupPeakMemoryKB(containerID string) (int, error) 
 		for _, file := range files {
 			value, err := readMemoryFileKB(filepath.Join(root, file))
 			if err == nil && value > 0 {
+				log.Printf("sandbox memory: read cgroup memory path=%s value_kb=%d", filepath.Join(root, file), value)
 				return value, nil
 			}
 		}
