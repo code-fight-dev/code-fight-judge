@@ -101,8 +101,6 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	createArgs = append(createArgs, req.Image)
 	createArgs = append(createArgs, req.Command...)
 
-	started := time.Now()
-
 	containerID, err := e.createContainer(ctx, createArgs)
 	if err != nil {
 		return nil, err
@@ -138,6 +136,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	}()
 
 	monitor := e.startStatsMonitor(runCtx, containerID)
+	started := time.Now()
 
 	if err := e.startContainer(runCtx, containerID, req.Stdin); err != nil {
 		duration := time.Since(started).Milliseconds()
@@ -326,7 +325,6 @@ func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID strin
 
 	go func() {
 		defer close(monitor.done)
-		log.Printf("sandbox stats: monitor started container_id=%s", containerID)
 		defer func() {
 			monitor.mu.Lock()
 			peakKB := monitor.peakKB
@@ -368,7 +366,6 @@ func (m *statsMonitor) Stop() int {
 func (m *statsMonitor) sample(ctx context.Context, e *RunscExecutor, containerID string) bool {
 	raw, err := e.readMemoryUsage(ctx, containerID)
 	if err != nil {
-		log.Printf("sandbox stats: sample error container_id=%s err=%v", containerID, err)
 		return false
 	}
 
@@ -386,14 +383,13 @@ func (m *statsMonitor) sample(ctx context.Context, e *RunscExecutor, containerID
 
 	if memoryKB > m.peakKB {
 		m.peakKB = memoryKB
-		log.Printf("sandbox stats: new peak memory sample peak_memory_kb=%d", memoryKB)
 	}
 
 	return true
 }
 
 func (e *RunscExecutor) readMemoryUsage(ctx context.Context, containerID string) (string, error) {
-	statsCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	statsCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
 	defer cancel()
 
 	var stdout bytes.Buffer
@@ -420,10 +416,14 @@ func (e *RunscExecutor) readMemoryUsage(ctx context.Context, containerID string)
 func (e *RunscExecutor) maxObservedMemoryKB(containerID string, statsPeakKB int) int {
 	cgroupPeakKB, err := e.readCgroupPeakMemoryKB(containerID)
 	if err != nil {
-		log.Printf("sandbox memory: cgroup fallback unavailable container_id=%s stats_peak_kb=%d err=%v", containerID, statsPeakKB, err)
+		if statsPeakKB == 0 {
+			log.Printf("sandbox memory: cgroup fallback unavailable container_id=%s stats_peak_kb=%d err=%v", containerID, statsPeakKB, err)
+		}
 		return statsPeakKB
 	}
-	log.Printf("sandbox memory: cgroup fallback container_id=%s stats_peak_kb=%d cgroup_peak_kb=%d", containerID, statsPeakKB, cgroupPeakKB)
+	if statsPeakKB == 0 || cgroupPeakKB > statsPeakKB {
+		log.Printf("sandbox memory: cgroup fallback container_id=%s stats_peak_kb=%d cgroup_peak_kb=%d", containerID, statsPeakKB, cgroupPeakKB)
+	}
 
 	if cgroupPeakKB > statsPeakKB {
 		return cgroupPeakKB
@@ -452,7 +452,6 @@ func (e *RunscExecutor) readCgroupPeakMemoryKB(containerID string) (int, error) 
 		for _, file := range files {
 			value, err := readMemoryFileKB(filepath.Join(root, file))
 			if err == nil && value > 0 {
-				log.Printf("sandbox memory: read cgroup memory path=%s value_kb=%d", filepath.Join(root, file), value)
 				return value, nil
 			}
 		}

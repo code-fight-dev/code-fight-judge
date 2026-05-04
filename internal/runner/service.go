@@ -135,7 +135,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			DurationMS:    compileResult.DurationMS,
 			CompileTimeMS: int(compileResult.DurationMS),
 			RunTimeMS:      0,
-			PeakMemoryKB:  compileResult.PeakMemoryKB,
+			PeakMemoryKB:  0,
 			Verdict:       "compile_error",
 			PassedTests:   0,
 			TotalTests:    totalTests,
@@ -152,7 +152,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		DurationMS:    compileResult.DurationMS,
 		CompileTimeMS: int(compileResult.DurationMS),
 		RunTimeMS:      0,
-		PeakMemoryKB:  compileResult.PeakMemoryKB,
+		PeakMemoryKB:  0,
 
 		Verdict:     "accepted",
 		PassedTests: 0,
