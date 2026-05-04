@@ -41,32 +41,35 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 
 	containerName := buildContainerName(req.JobID)
 
-	args := []string{
-		"run",
-		"--rm",
+	createArgs := []string{
+		"create",
 		"--runtime=" + runtimeName,
 		"--name", containerName,
 		"--security-opt", "no-new-privileges",
 	}
 
+	if req.Stdin != "" {
+		createArgs = append(createArgs, "-i")
+	}
+
 	if req.NetworkNone {
-		args = append(args, "--network", "none")
+		createArgs = append(createArgs, "--network", "none")
 	}
 
 	if req.CPUCount > 0 {
-		args = append(args, "--cpus", strconv.FormatFloat(req.CPUCount, 'f', -1, 64))
+		createArgs = append(createArgs, "--cpus", strconv.FormatFloat(req.CPUCount, 'f', -1, 64))
 	}
 
 	if req.MemoryMB > 0 {
-		args = append(args, "--memory", fmt.Sprintf("%dm", req.MemoryMB))
+		createArgs = append(createArgs, "--memory", fmt.Sprintf("%dm", req.MemoryMB))
 	}
 
 	if req.PidsLimit > 0 {
-		args = append(args, "--pids-limit", strconv.Itoa(req.PidsLimit))
+		createArgs = append(createArgs, "--pids-limit", strconv.Itoa(req.PidsLimit))
 	}
 
 	if req.ReadOnlyRoot {
-		args = append(args, "--read-only")
+		createArgs = append(createArgs, "--read-only")
 	}
 
 	tmpfsSizeMB := req.TmpfsSizeMB
@@ -74,7 +77,7 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		tmpfsSizeMB = 256
 	}
 
-	args = append(args,
+	createArgs = append(createArgs,
 		"--tmpfs", fmt.Sprintf("/tmp:exec,size=%dm", tmpfsSizeMB),
 		"--tmpfs", "/gocache:exec,size=256m",
 		"-e", "TMPDIR=/tmp",
@@ -82,71 +85,169 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		"-e", "GOCACHE=/gocache",
 	)
 
-	args = append(args,
+	createArgs = append(createArgs,
 		"-v", fmt.Sprintf("%s:/workspace:ro", filepath.Clean(req.WorkDirHost)),
 		"-v", fmt.Sprintf("%s:/output:rw", filepath.Clean(req.OutputDirHost)),
 		"-w", "/workspace",
 	)
 
 	for k, v := range req.Env {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
+		createArgs = append(createArgs, "-e", fmt.Sprintf("%s=%s", k, v))
 	}
 
-	args = append(args, req.Image)
-	args = append(args, req.Command...)
+	createArgs = append(createArgs, req.Image)
+	createArgs = append(createArgs, req.Command...)
 
 	started := time.Now()
 
-	cmd := exec.CommandContext(ctx, e.dockerBin, args...)
+	containerID, err := e.createContainer(ctx, createArgs)
+	if err != nil {
+		return nil, err
+	}
+	defer e.forceRemoveContainer(containerName)
 
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
+	if err := e.startContainer(ctx, containerID, req.Stdin); err != nil {
+		duration := time.Since(started).Milliseconds()
+		stdout, stderr := e.readContainerLogs(context.Background(), containerID)
 
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+		if ctx.Err() != nil {
+			return &ExecuteResult{
+				ExitCode:   -1,
+				Stdout:     stdout,
+				Stderr:     stderr,
+				DurationMS: duration,
+			}, nil
+		}
 
-	if req.Stdin != "" {
-		cmd.Stdin = strings.NewReader(req.Stdin)
+		return nil, err
 	}
 
-	err := cmd.Run()
+	exitCode, err := e.waitContainer(ctx, containerID)
 	duration := time.Since(started).Milliseconds()
-
-	if ctx.Err() != nil {
-		_ = e.forceRemoveContainer(containerName)
-
-		return &ExecuteResult{
-			ExitCode:   -1,
-			Stdout:     stdout.String(),
-			Stderr:     stderr.String(),
-			DurationMS: duration,
-		}, nil
-	}
-
-	exitCode := 0
+	stdout, stderr := e.readContainerLogs(context.Background(), containerID)
 
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitCode = exitErr.ExitCode()
-		} else {
-			_ = e.forceRemoveContainer(containerName)
-
-			return nil, fmt.Errorf(
-				"sandbox execute: docker run failed: %w; args=%v; stderr=%s",
-				err,
-				args,
-				stderr.String(),
-			)
+		if ctx.Err() != nil {
+			return &ExecuteResult{
+				ExitCode:   -1,
+				Stdout:     stdout,
+				Stderr:     stderr,
+				DurationMS: duration,
+			}, nil
 		}
+
+		return nil, err
 	}
 
 	return &ExecuteResult{
 		ExitCode:   exitCode,
-		Stdout:     stdout.String(),
-		Stderr:     stderr.String(),
+		Stdout:     stdout,
+		Stderr:     stderr,
 		DurationMS: duration,
 	}, nil
+}
+
+func (e *RunscExecutor) createContainer(ctx context.Context, args []string) (string, error) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := exec.CommandContext(ctx, e.dockerBin, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf(
+			"sandbox execute: docker create failed: %w; args=%v; stderr=%s",
+			err,
+			args,
+			stderr.String(),
+		)
+	}
+
+	containerID := strings.TrimSpace(stdout.String())
+	if containerID == "" {
+		return "", fmt.Errorf("sandbox execute: docker create returned empty container id")
+	}
+
+	return containerID, nil
+}
+
+func (e *RunscExecutor) startContainer(ctx context.Context, containerID string, stdin string) error {
+	args := []string{"start"}
+
+	if stdin != "" {
+		args = append(args, "--attach", "--interactive")
+	}
+
+	args = append(args, containerID)
+
+	var stderr bytes.Buffer
+	cmd := exec.CommandContext(ctx, e.dockerBin, args...)
+	cmd.Stderr = &stderr
+
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+
+	if err := cmd.Run(); err != nil {
+		if isExitError(err) {
+			return nil
+		}
+
+		return fmt.Errorf(
+			"sandbox execute: docker start failed: %w; args=%v; stderr=%s",
+			err,
+			args,
+			stderr.String(),
+		)
+	}
+
+	return nil
+}
+
+func (e *RunscExecutor) waitContainer(ctx context.Context, containerID string) (int, error) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	args := []string{"wait", containerID}
+	cmd := exec.CommandContext(ctx, e.dockerBin, args...)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return -1, fmt.Errorf(
+			"sandbox execute: docker wait failed: %w; args=%v; stderr=%s",
+			err,
+			args,
+			stderr.String(),
+		)
+	}
+
+	exitCodeText := strings.TrimSpace(stdout.String())
+	exitCode, err := strconv.Atoi(exitCodeText)
+	if err != nil {
+		return -1, fmt.Errorf("sandbox execute: parse docker wait exit code %q: %w", exitCodeText, err)
+	}
+
+	return exitCode, nil
+}
+
+func (e *RunscExecutor) readContainerLogs(ctx context.Context, containerID string) (string, string) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	cmd := exec.CommandContext(ctx, e.dockerBin, "logs", containerID)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	_ = cmd.Run()
+
+	return stdout.String(), stderr.String()
+}
+
+func isExitError(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr)
 }
 
 func buildContainerName(jobID string) string {
