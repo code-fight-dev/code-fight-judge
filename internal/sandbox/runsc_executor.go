@@ -1,10 +1,12 @@
 package sandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -314,6 +316,7 @@ type statsMonitor struct {
 	done   chan struct{}
 	mu     sync.Mutex
 	peakKB int
+	cmd    *exec.Cmd
 }
 
 func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID string) *statsMonitor {
@@ -336,7 +339,7 @@ func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID strin
 		defer ticker.Stop()
 
 		for {
-			sampled := monitor.sample(monitorCtx, e, containerID)
+			sampled := monitor.stream(e, monitorCtx, containerID)
 
 			select {
 			case <-monitorCtx.Done():
@@ -355,6 +358,7 @@ func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID strin
 
 func (m *statsMonitor) Stop() int {
 	m.cancel()
+	m.kill()
 	<-m.done
 
 	m.mu.Lock()
@@ -363,54 +367,76 @@ func (m *statsMonitor) Stop() int {
 	return m.peakKB
 }
 
-func (m *statsMonitor) sample(ctx context.Context, e *RunscExecutor, containerID string) bool {
-	raw, err := e.readMemoryUsage(ctx, containerID)
-	if err != nil {
-		return false
-	}
-
-	memoryKB, err := parseDockerMemoryUsageKB(raw)
-	if err != nil {
-		log.Printf("sandbox stats: parse memory usage error raw=%q err=%v", raw, err)
-		return false
-	}
-	if memoryKB <= 0 {
-		return false
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if memoryKB > m.peakKB {
-		m.peakKB = memoryKB
-	}
-
-	return true
-}
-
-func (e *RunscExecutor) readMemoryUsage(ctx context.Context, containerID string) (string, error) {
-	statsCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
-	defer cancel()
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
+func (m *statsMonitor) stream(e *RunscExecutor, ctx context.Context, containerID string) bool {
 	cmd := exec.CommandContext(
-		statsCtx,
+		ctx,
 		e.dockerBin,
 		"stats",
-		"--no-stream",
 		"--format", "{{.MemUsage}}",
 		containerID,
 	)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%w; stderr=%s", err, stderr.String())
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Printf("sandbox stats: stdout pipe error container_id=%s err=%v", containerID, err)
+		return false
 	}
 
-	return stdout.String(), nil
+	if err := cmd.Start(); err != nil {
+		log.Printf("sandbox stats: start error container_id=%s err=%v", containerID, err)
+		return false
+	}
+
+	m.setCmd(cmd)
+
+	samples := m.readStats(stdout)
+	_ = cmd.Wait()
+	m.setCmd(nil)
+
+	return samples > 0
+}
+
+func (m *statsMonitor) setCmd(cmd *exec.Cmd) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.cmd = cmd
+}
+
+func (m *statsMonitor) kill() {
+	m.mu.Lock()
+	cmd := m.cmd
+	m.mu.Unlock()
+
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+func (m *statsMonitor) readStats(r io.Reader) int {
+	scanner := bufio.NewScanner(r)
+	samples := 0
+
+	for scanner.Scan() {
+		memoryKB, err := parseDockerMemoryUsageKB(scanner.Text())
+		if err != nil {
+			log.Printf("sandbox stats: parse memory usage error raw=%q err=%v", scanner.Text(), err)
+			continue
+		}
+		if memoryKB <= 0 {
+			continue
+		}
+
+		samples++
+
+		m.mu.Lock()
+		if memoryKB > m.peakKB {
+			m.peakKB = memoryKB
+		}
+		m.mu.Unlock()
+	}
+
+	return samples
 }
 
 func (e *RunscExecutor) maxObservedMemoryKB(containerID string, statsPeakKB int) int {
