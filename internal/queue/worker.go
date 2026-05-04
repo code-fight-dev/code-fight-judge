@@ -83,7 +83,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 
 			CompileTimeMs: intPtr(0),
 			RunTimeMs:     intPtr(0),
-			PeakMemoryKb:  intPtr(0),
+			PeakMemoryKb:  nil,
 			ExitCode:      intPtr(-1),
 
 			CompileLog:      stringPtr(""),
@@ -119,8 +119,8 @@ func (w *Worker) processOne(ctx context.Context) error {
 		Score:       result.Score,
 
 		CompileTimeMs: intPtr(result.CompileTimeMS),
-		RunTimeMs: intPtr(result.RunTimeMS),
-		PeakMemoryKb:  intPtr(0),
+		RunTimeMs:     intPtr(result.RunTimeMS),
+		PeakMemoryKb:  nullableInt(result.PeakMemoryKB),
 		ExitCode:      intPtr(result.ExitCode),
 
 		CompileLog:      stringPtr(""),
@@ -172,6 +172,14 @@ func intPtr(v int) *int {
 	return &v
 }
 
+func nullableInt(v int) *int {
+	if v <= 0 {
+		return nil
+	}
+
+	return &v
+}
+
 func int64ToIntPtr(v int64) *int {
 	n := int(v)
 	return &n
@@ -193,7 +201,7 @@ func toCallbackTests(results []runner.TestResult) []callback.TestResult {
 			TestCaseID:     r.TestCaseID,
 			Status:         r.Status,
 			TimeMs:         intPtr(r.TimeMS),
-			MemoryKb:       intPtr(r.MemoryKB),
+			MemoryKb:       nullableInt(r.MemoryKB),
 			ExitCode:       intPtr(r.ExitCode),
 			CheckerMessage: nullableString(r.CheckerMessage),
 		})

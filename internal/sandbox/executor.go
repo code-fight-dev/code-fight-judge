@@ -1,6 +1,9 @@
 package sandbox
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Executor interface {
 	Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error)
@@ -22,11 +25,14 @@ type ExecuteRequest struct {
 	NetworkNone  bool
 	TmpfsSizeMB  int
 	RuntimeName  string
+	Timeout      time.Duration
 }
 
 type ExecuteResult struct {
-	ExitCode   int
-	Stdout     string
-	Stderr     string
-	DurationMS int64
+	ExitCode     int
+	Stdout       string
+	Stderr       string
+	DurationMS   int64
+	PeakMemoryKB int
+	TimedOut     bool
 }
