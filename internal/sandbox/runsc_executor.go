@@ -1,10 +1,12 @@
 package sandbox
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -305,17 +307,32 @@ func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID strin
 	go func() {
 		defer close(monitor.done)
 
-		ticker := time.NewTicker(50 * time.Millisecond)
-		defer ticker.Stop()
-
 		for {
-			monitor.sample(e, containerID)
+			cmd := exec.CommandContext(
+				monitorCtx,
+				e.dockerBin,
+				"stats",
+				"--format", "{{.MemUsage}}",
+				containerID,
+			)
 
-			select {
-			case <-monitorCtx.Done():
+			stdout, err := cmd.StdoutPipe()
+			if err != nil {
 				return
-			case <-ticker.C:
 			}
+
+			if err := cmd.Start(); err != nil {
+				select {
+				case <-monitorCtx.Done():
+					return
+				case <-time.After(25 * time.Millisecond):
+					continue
+				}
+			}
+
+			monitor.readStats(stdout)
+			_ = cmd.Wait()
+			return
 		}
 	}()
 
@@ -332,40 +349,21 @@ func (m *statsMonitor) Stop() int {
 	return m.peakKB
 }
 
-func (m *statsMonitor) sample(e *RunscExecutor, containerID string) {
-	memoryKB, err := e.readMemoryUsageKB(containerID)
-	if err != nil {
-		return
+func (m *statsMonitor) readStats(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+
+	for scanner.Scan() {
+		memoryKB, err := parseDockerMemoryUsageKB(scanner.Text())
+		if err != nil {
+			continue
+		}
+
+		m.mu.Lock()
+		if memoryKB > m.peakKB {
+			m.peakKB = memoryKB
+		}
+		m.mu.Unlock()
 	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if memoryKB > m.peakKB {
-		m.peakKB = memoryKB
-	}
-}
-
-func (e *RunscExecutor) readMemoryUsageKB(containerID string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-
-	var stdout bytes.Buffer
-	cmd := exec.CommandContext(
-		ctx,
-		e.dockerBin,
-		"stats",
-		"--no-stream",
-		"--format", "{{.MemUsage}}",
-		containerID,
-	)
-	cmd.Stdout = &stdout
-
-	if err := cmd.Run(); err != nil {
-		return 0, err
-	}
-
-	return parseDockerMemoryUsageKB(stdout.String())
 }
 
 func parseDockerMemoryUsageKB(value string) (int, error) {
