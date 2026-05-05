@@ -10,13 +10,14 @@ type Executor interface {
 }
 
 type ExecuteRequest struct {
-	JobID         string
-	Image         string
-	WorkDirHost   string
-	OutputDirHost string
-	Command       []string
-	Env           map[string]string
-	Stdin         string
+	JobID             string
+	Image             string
+	WorkDirHost       string
+	OutputDirHost     string
+	OutputDirReadOnly bool
+	Command           []string
+	Env               map[string]string
+	Stdin             string
 
 	CPUCount     float64
 	MemoryMB     int

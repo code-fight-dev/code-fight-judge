@@ -8,15 +8,20 @@ import (
 	"strings"
 
 	"code-fight-judge/internal/jobs"
+	"code-fight-judge/internal/languages"
 	"code-fight-judge/internal/storage"
 )
 
 type JobsHandler struct {
-	repo *storage.JobsRepo
+	repo      *storage.JobsRepo
+	languages *languages.Registry
 }
 
-func NewJobsHandler(repo *storage.JobsRepo) *JobsHandler {
-	return &JobsHandler{repo: repo}
+func NewJobsHandler(repo *storage.JobsRepo, languageRegistry *languages.Registry) *JobsHandler {
+	return &JobsHandler{
+		repo:      repo,
+		languages: languageRegistry,
+	}
 }
 
 func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
@@ -31,7 +36,7 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 			return
 		}
 
-		if err := validateSubmitRequest(req); err != nil {
+		if err := validateSubmitRequest(req, h.languages); err != nil {
 			writeError(w, stdhttp.StatusBadRequest, "validation_error", err.Error())
 			return
 		}
@@ -51,7 +56,7 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 	}
 }
 
-func validateSubmitRequest(req jobs.SubmitRequest) error {
+func validateSubmitRequest(req jobs.SubmitRequest, languageRegistry *languages.Registry) error {
 	switch {
 	case strings.TrimSpace(req.SubmissionID) == "":
 		return errors.New("submission_id is required")
@@ -75,6 +80,10 @@ func validateSubmitRequest(req jobs.SubmitRequest) error {
 		return errors.New("limits.output_kb must be > 0")
 	case len(req.Tests) == 0:
 		return errors.New("tests must contain at least one test")
+	}
+
+	if !languageRegistry.IsSupported(req.Language, req.LanguageVersion) {
+		return errors.New("language and language_version are not supported")
 	}
 
 	for i, test := range req.Tests {

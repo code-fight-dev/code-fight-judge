@@ -90,9 +90,14 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		"-e", "GOCACHE=/gocache",
 	)
 
+	outputMode := "rw"
+	if req.OutputDirReadOnly {
+		outputMode = "ro"
+	}
+
 	createArgs = append(createArgs,
 		"-v", fmt.Sprintf("%s:/workspace:ro", filepath.Clean(req.WorkDirHost)),
-		"-v", fmt.Sprintf("%s:/output:rw", filepath.Clean(req.OutputDirHost)),
+		"-v", fmt.Sprintf("%s:/output:%s", filepath.Clean(req.OutputDirHost), outputMode),
 		"-w", "/workspace",
 	)
 
