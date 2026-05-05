@@ -6,10 +6,11 @@ import (
 	"code-fight-judge/internal/config"
 )
 
-func NewRouter(cfg config.Config, jobsHandler *JobsHandler) stdhttp.Handler {
+func NewRouter(cfg config.Config, jobsHandler *JobsHandler, languagesHandler *LanguagesHandler) stdhttp.Handler {
 	mux := stdhttp.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", HealthHandler())
+	mux.HandleFunc("GET /languages", languagesHandler.ListSupported())
 	mux.HandleFunc("POST /submissions", jobsHandler.CreateSubmission())
 
 	return withCommonMiddleware(cfg, mux)
