@@ -8,9 +8,10 @@ import (
 	"net/http"
 	"time"
 
+	"code-fight-judge/internal/callback"
 	"code-fight-judge/internal/config"
 	apphttp "code-fight-judge/internal/http"
-	"code-fight-judge/internal/callback"
+	"code-fight-judge/internal/languages"
 	"code-fight-judge/internal/queue"
 	"code-fight-judge/internal/runner"
 	"code-fight-judge/internal/sandbox"
@@ -41,12 +42,13 @@ func New() (*App, error) {
 	}
 
 	jobsRepo := storage.NewJobsRepo(db)
-	jobsHandler := apphttp.NewJobsHandler(jobsRepo)
+	languageRegistry := languages.NewDefaultRegistry(cfg.JudgeGoImage)
+	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry)
 	router := apphttp.NewRouter(cfg, jobsHandler)
 
 	executor := sandbox.NewRunscExecutor()
 
-	runnerSvc := runner.NewService(cfg, executor)
+	runnerSvc := runner.NewService(cfg, executor, languageRegistry)
 	callbackClient := callback.NewClient(10 * time.Second)
 
 	worker := queue.NewWorker(jobsRepo, runnerSvc, callbackClient, 2*time.Second)

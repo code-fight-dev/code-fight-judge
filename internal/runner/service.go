@@ -10,18 +10,21 @@ import (
 
 	"code-fight-judge/internal/config"
 	"code-fight-judge/internal/jobs"
+	"code-fight-judge/internal/languages"
 	"code-fight-judge/internal/sandbox"
 )
 
 type Service struct {
-	cfg      config.Config
-	executor sandbox.Executor
+	cfg       config.Config
+	executor  sandbox.Executor
+	languages *languages.Registry
 }
 
-func NewService(cfg config.Config, executor sandbox.Executor) *Service {
+func NewService(cfg config.Config, executor sandbox.Executor, languageRegistry *languages.Registry) *Service {
 	return &Service{
-		cfg:      cfg,
-		executor: executor,
+		cfg:       cfg,
+		executor:  executor,
+		languages: languageRegistry,
 	}
 }
 
@@ -54,6 +57,23 @@ type TestResult struct {
 }
 
 func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
+	language, ok := s.languages.Lookup(job.Language, job.LanguageVersion)
+	if !ok {
+		return &RunResult{
+			ExitCode:     -1,
+			Stdout:       "",
+			Stderr:       "",
+			DurationMS:   0,
+			PeakMemoryKB: 0,
+			Verdict:      "system_error",
+			PassedTests:  0,
+			TotalTests:   len(job.Tests),
+			Score:        0,
+			ErrorMessage: "language and language_version are not supported",
+			TestResults:  []TestResult{},
+		}, nil
+	}
+
 	jobDir, err := os.MkdirTemp(s.cfg.JudgeWorkDir, "judge-job-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp job dir: %w", err)
@@ -79,7 +99,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		return nil, fmt.Errorf("chmod output dir: %w", err)
 	}
 
-	mainFile := filepath.Join(workspaceDir, "main.go")
+	mainFile := filepath.Join(workspaceDir, language.SourceFile)
 	if err := os.WriteFile(mainFile, []byte(job.SourceCode), 0644); err != nil {
 		return nil, fmt.Errorf("write source file: %w", err)
 	}
@@ -108,10 +128,10 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 	compileResult, err := s.executor.Execute(ctx, sandbox.ExecuteRequest{
 		JobID:         job.ID + "-compile",
-		Image:         s.cfg.JudgeGoImage,
+		Image:         language.Image,
 		WorkDirHost:   workspaceDir,
 		OutputDirHost: outputDir,
-		Command:       []string{"sh", "-c", "go build -o /output/program /workspace/main.go"},
+		Command:       language.CompileCommand,
 
 		CPUCount:    s.cfg.JudgeCPUCount,
 		MemoryMB:    memoryMB,
@@ -120,7 +140,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 		RuntimeName: s.cfg.JudgeRuntime,
 
-		ReadOnlyRoot: false,
+		ReadOnlyRoot: true,
 		TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
 	})
 	if err != nil {
@@ -181,12 +201,13 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 	for _, test := range job.Tests {
 		runResult, err := s.executor.Execute(ctx, sandbox.ExecuteRequest{
-			JobID:         fmt.Sprintf("%s-test-%s", job.ID, test.ID),
-			Image:         s.cfg.JudgeGoImage,
-			WorkDirHost:   workspaceDir,
-			OutputDirHost: outputDir,
-			Command:       []string{"sh", "-c", "/output/program"},
-			Stdin:         test.Input,
+			JobID:             fmt.Sprintf("%s-test-%s", job.ID, test.ID),
+			Image:             language.Image,
+			WorkDirHost:       workspaceDir,
+			OutputDirHost:     outputDir,
+			OutputDirReadOnly: true,
+			Command:           language.RunCommand,
+			Stdin:             test.Input,
 
 			CPUCount:    s.cfg.JudgeCPUCount,
 			MemoryMB:    memoryMB,
@@ -195,7 +216,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			RuntimeName: s.cfg.JudgeRuntime,
 
-			ReadOnlyRoot: false,
+			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
 			Timeout:      time.Duration(job.Limits.TimeMS) * time.Millisecond,
 		})
