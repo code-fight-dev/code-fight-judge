@@ -44,7 +44,8 @@ func New() (*App, error) {
 	jobsRepo := storage.NewJobsRepo(db)
 	languageRegistry := languages.NewDefaultRegistry(cfg.JudgeGoImage)
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry)
-	router := apphttp.NewRouter(cfg, jobsHandler)
+	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
+	router := apphttp.NewRouter(cfg, jobsHandler, languagesHandler)
 
 	executor := sandbox.NewRunscExecutor()
 

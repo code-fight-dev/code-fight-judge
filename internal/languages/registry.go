@@ -1,6 +1,9 @@
 package languages
 
-import "strings"
+import (
+	"slices"
+	"strings"
+)
 
 const (
 	GoLanguage = "go"
@@ -18,6 +21,11 @@ type Definition struct {
 
 type Registry struct {
 	definitions map[string]Definition
+}
+
+type SupportedLanguage struct {
+	Language string `json:"language"`
+	Version  string `json:"version"`
 }
 
 func NewDefaultRegistry(goImage string) *Registry {
@@ -74,6 +82,30 @@ func (r *Registry) Lookup(language, version string) (Definition, bool) {
 func (r *Registry) IsSupported(language, version string) bool {
 	_, ok := r.Lookup(language, version)
 	return ok
+}
+
+func (r *Registry) Supported() []SupportedLanguage {
+	if r == nil {
+		return []SupportedLanguage{}
+	}
+
+	supported := make([]SupportedLanguage, 0, len(r.definitions))
+	for _, definition := range r.definitions {
+		supported = append(supported, SupportedLanguage{
+			Language: definition.Language,
+			Version:  definition.Version,
+		})
+	}
+
+	slices.SortFunc(supported, func(left, right SupportedLanguage) int {
+		if left.Language != right.Language {
+			return strings.Compare(left.Language, right.Language)
+		}
+
+		return strings.Compare(left.Version, right.Version)
+	})
+
+	return supported
 }
 
 func NormalizeLanguage(language string) string {
