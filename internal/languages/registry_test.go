@@ -3,7 +3,10 @@ package languages
 import "testing"
 
 func TestRegistryLookupNormalizesLanguageAndVersion(t *testing.T) {
-	registry := NewDefaultRegistry("judge-go:test")
+	registry := NewDefaultRegistry(RuntimeImages{
+		Go:     "judge-go:test",
+		Python: "judge-python:test",
+	})
 
 	definition, ok := registry.Lookup(" Go ", " 1.24 ")
 	if !ok {
@@ -21,12 +24,40 @@ func TestRegistryLookupNormalizesLanguageAndVersion(t *testing.T) {
 	}
 }
 
+func TestRegistryLookupSupportsPythonWithoutCompileCommand(t *testing.T) {
+	registry := NewDefaultRegistry(RuntimeImages{
+		Go:     "judge-go:test",
+		Python: "judge-python:test",
+	})
+
+	definition, ok := registry.Lookup("python", "3.12")
+	if !ok {
+		t.Fatal("Lookup() did not find python 3.12")
+	}
+
+	if definition.Image != "judge-python:test" {
+		t.Fatalf("Lookup().Image = %q, want %q", definition.Image, "judge-python:test")
+	}
+	if definition.SourceFile != "main.py" {
+		t.Fatalf("Lookup().SourceFile = %q, want %q", definition.SourceFile, "main.py")
+	}
+	if len(definition.CompileCommand) != 0 {
+		t.Fatalf("Lookup().CompileCommand len = %d, want 0", len(definition.CompileCommand))
+	}
+	if len(definition.RunCommand) == 0 {
+		t.Fatal("Lookup().RunCommand is empty")
+	}
+}
+
 func TestRegistrySupportedReturnsPublicLanguageList(t *testing.T) {
-	registry := NewDefaultRegistry("judge-go:test")
+	registry := NewDefaultRegistry(RuntimeImages{
+		Go:     "judge-go:test",
+		Python: "judge-python:test",
+	})
 
 	supported := registry.Supported()
-	if len(supported) != 1 {
-		t.Fatalf("Supported() len = %d, want 1", len(supported))
+	if len(supported) != 2 {
+		t.Fatalf("Supported() len = %d, want 2", len(supported))
 	}
 
 	if supported[0].Language != GoLanguage {
@@ -34,5 +65,11 @@ func TestRegistrySupportedReturnsPublicLanguageList(t *testing.T) {
 	}
 	if supported[0].Version != GoVersion {
 		t.Fatalf("Supported()[0].Version = %q, want %q", supported[0].Version, GoVersion)
+	}
+	if supported[1].Language != PythonLanguage {
+		t.Fatalf("Supported()[1].Language = %q, want %q", supported[1].Language, PythonLanguage)
+	}
+	if supported[1].Version != PythonVersion {
+		t.Fatalf("Supported()[1].Version = %q, want %q", supported[1].Version, PythonVersion)
 	}
 }

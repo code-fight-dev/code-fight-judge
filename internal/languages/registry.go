@@ -6,9 +6,16 @@ import (
 )
 
 const (
-	GoLanguage = "go"
-	GoVersion  = "1.24"
+	GoLanguage     = "go"
+	GoVersion      = "1.24"
+	PythonLanguage = "python"
+	PythonVersion  = "3.12"
 )
+
+type RuntimeImages struct {
+	Go     string
+	Python string
+}
 
 type Definition struct {
 	Language       string
@@ -28,19 +35,29 @@ type SupportedLanguage struct {
 	Version  string `json:"version"`
 }
 
-func NewDefaultRegistry(goImage string) *Registry {
-	if strings.TrimSpace(goImage) == "" {
-		goImage = "judge-go:1.24"
+func NewDefaultRegistry(images RuntimeImages) *Registry {
+	if strings.TrimSpace(images.Go) == "" {
+		images.Go = "judge-go:1.24"
+	}
+	if strings.TrimSpace(images.Python) == "" {
+		images.Python = "judge-python:3.12"
 	}
 
 	return NewRegistry([]Definition{
 		{
 			Language:       GoLanguage,
 			Version:        GoVersion,
-			Image:          goImage,
+			Image:          images.Go,
 			SourceFile:     "main.go",
 			CompileCommand: []string{"sh", "-c", "go build -o /output/program /workspace/main.go"},
 			RunCommand:     []string{"sh", "-c", "/output/program"},
+		},
+		{
+			Language:   PythonLanguage,
+			Version:    PythonVersion,
+			Image:      images.Python,
+			SourceFile: "main.py",
+			RunCommand: []string{"python3", "-B", "/workspace/main.py"},
 		},
 	})
 }

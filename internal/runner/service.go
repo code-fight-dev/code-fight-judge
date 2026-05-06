@@ -126,25 +126,29 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		}, nil
 	}
 
-	compileResult, err := s.executor.Execute(ctx, sandbox.ExecuteRequest{
-		JobID:         job.ID + "-compile",
-		Image:         language.Image,
-		WorkDirHost:   workspaceDir,
-		OutputDirHost: outputDir,
-		Command:       language.CompileCommand,
+	compileResult := &sandbox.ExecuteResult{}
 
-		CPUCount:    s.cfg.JudgeCPUCount,
-		MemoryMB:    memoryMB,
-		PidsLimit:   s.cfg.JudgeDefaultPids,
-		NetworkNone: true,
+	if len(language.CompileCommand) > 0 {
+		compileResult, err = s.executor.Execute(ctx, sandbox.ExecuteRequest{
+			JobID:         job.ID + "-compile",
+			Image:         language.Image,
+			WorkDirHost:   workspaceDir,
+			OutputDirHost: outputDir,
+			Command:       language.CompileCommand,
 
-		RuntimeName: s.cfg.JudgeRuntime,
+			CPUCount:    s.cfg.JudgeCPUCount,
+			MemoryMB:    memoryMB,
+			PidsLimit:   s.cfg.JudgeDefaultPids,
+			NetworkNone: true,
 
-		ReadOnlyRoot: true,
-		TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("compile sandbox: %w", err)
+			RuntimeName: s.cfg.JudgeRuntime,
+
+			ReadOnlyRoot: true,
+			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("compile sandbox: %w", err)
+		}
 	}
 
 	if compileResult.OOMKilled || compileResult.ExitCode == 137 {

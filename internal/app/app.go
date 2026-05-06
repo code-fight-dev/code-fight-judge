@@ -42,7 +42,10 @@ func New() (*App, error) {
 	}
 
 	jobsRepo := storage.NewJobsRepo(db)
-	languageRegistry := languages.NewDefaultRegistry(cfg.JudgeGoImage)
+	languageRegistry := languages.NewDefaultRegistry(languages.RuntimeImages{
+		Go:     cfg.JudgeGoImage,
+		Python: cfg.JudgePythonImage,
+	})
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry)
 	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
 	router := apphttp.NewRouter(cfg, jobsHandler, languagesHandler)
