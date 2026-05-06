@@ -21,6 +21,7 @@ type Config struct {
 
 	JudgeWorkDir         string
 	JudgeGoImage         string
+	JudgePythonImage     string
 	JudgeRuntime         string
 	JudgeCPUCount        float64
 	JudgeDefaultMemoryMB int
@@ -42,6 +43,7 @@ func Load() (Config, error) {
 
 		JudgeWorkDir:         getString("JUDGE_WORKDIR", "/tmp/code-fight/jobs"),
 		JudgeGoImage:         getString("JUDGE_GO_IMAGE", "judge-go:1.24"),
+		JudgePythonImage:     getString("JUDGE_PYTHON_IMAGE", "judge-python:3.12"),
 		JudgeRuntime:         getString("JUDGE_RUNTIME", "runsc"),
 		JudgeCPUCount:        getFloat64("JUDGE_CPU_COUNT", 1),
 		JudgeDefaultMemoryMB: getInt("JUDGE_DEFAULT_MEMORY_MB", 256),
@@ -60,6 +62,9 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.JudgeGoImage) == "" {
 		return Config{}, fmt.Errorf("JUDGE_GO_IMAGE is required")
+	}
+	if strings.TrimSpace(cfg.JudgePythonImage) == "" {
+		return Config{}, fmt.Errorf("JUDGE_PYTHON_IMAGE is required")
 	}
 	if strings.TrimSpace(cfg.JudgeRuntime) == "" {
 		return Config{}, fmt.Errorf("JUDGE_RUNTIME is required")
