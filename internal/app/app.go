@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os/exec"
+	"strings"
 	"time"
 
 	"code-fight-judge/internal/callback"
@@ -46,16 +48,27 @@ func New() (*App, error) {
 		Go:     cfg.JudgeGoImage,
 		Python: cfg.JudgePythonImage,
 	})
-	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry)
+	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg)
 	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
-	router := apphttp.NewRouter(cfg, jobsHandler, languagesHandler)
+	readiness := readinessChecker{
+		db:     db,
+		images: []string{cfg.JudgeGoImage, cfg.JudgePythonImage},
+	}
+	router := apphttp.NewRouter(cfg, jobsHandler, languagesHandler, readiness)
 
 	executor := sandbox.NewRunscExecutor()
 
 	runnerSvc := runner.NewService(cfg, executor, languageRegistry)
 	callbackClient := callback.NewClient(10 * time.Second)
 
-	worker := queue.NewWorker(jobsRepo, runnerSvc, callbackClient, 2*time.Second)
+	worker := queue.NewWorker(
+		jobsRepo,
+		runnerSvc,
+		callbackClient,
+		2*time.Second,
+		cfg.JudgeCallbackAttempts,
+		cfg.JudgeCallbackBackoff,
+	)
 
 	server := &http.Server{
 		Addr:         cfg.Address(),
@@ -71,6 +84,41 @@ func New() (*App, error) {
 		db:         db,
 		worker:     worker,
 	}, nil
+}
+
+type readinessChecker struct {
+	db     *pgxpool.Pool
+	images []string
+}
+
+func (c readinessChecker) CheckReady(ctx context.Context) map[string]string {
+	checks := map[string]string{
+		"db":     "ok",
+		"docker": "ok",
+		"images": "ok",
+	}
+
+	if err := c.db.Ping(ctx); err != nil {
+		checks["db"] = err.Error()
+	}
+
+	if err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Run(); err != nil {
+		checks["docker"] = err.Error()
+	}
+
+	for _, image := range c.images {
+		image = strings.TrimSpace(image)
+		if image == "" {
+			checks["images"] = "empty image reference"
+			continue
+		}
+		if err := exec.CommandContext(ctx, "docker", "image", "inspect", image).Run(); err != nil {
+			checks["images"] = "missing " + image + ": " + err.Error()
+			break
+		}
+	}
+
+	return checks
 }
 
 func (a *App) Run(ctx context.Context) error {
