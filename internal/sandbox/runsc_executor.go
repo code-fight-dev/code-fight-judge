@@ -51,6 +51,12 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 		"--runtime=" + runtimeName,
 		"--name", containerName,
 		"--security-opt", "no-new-privileges",
+		"--cap-drop", "ALL",
+		"--ipc", "none",
+		"--user", "10001:10001",
+		"--ulimit", "nofile=256:256",
+		"--ulimit", "fsize=134217728:134217728",
+		"--ulimit", "nproc=128:128",
 	}
 
 	if req.Stdin != "" {
