@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"code-fight-judge/internal/config"
 	"code-fight-judge/internal/jobs"
 	"code-fight-judge/internal/languages"
 	"code-fight-judge/internal/storage"
@@ -15,12 +16,14 @@ import (
 type JobsHandler struct {
 	repo      *storage.JobsRepo
 	languages *languages.Registry
+	cfg       config.Config
 }
 
-func NewJobsHandler(repo *storage.JobsRepo, languageRegistry *languages.Registry) *JobsHandler {
+func NewJobsHandler(repo *storage.JobsRepo, languageRegistry *languages.Registry, cfg config.Config) *JobsHandler {
 	return &JobsHandler{
 		repo:      repo,
 		languages: languageRegistry,
+		cfg:       cfg,
 	}
 }
 
@@ -36,7 +39,14 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 			return
 		}
 
-		if err := validateSubmitRequest(req, h.languages); err != nil {
+		if h.cfg.JudgeCallbackURL != "" {
+			req.CallbackURL = h.cfg.JudgeCallbackURL
+		}
+		if h.cfg.JudgeCallbackToken != "" {
+			req.CallbackToken = h.cfg.JudgeCallbackToken
+		}
+
+		if err := validateSubmitRequest(req, h.languages, h.cfg); err != nil {
 			writeError(w, stdhttp.StatusBadRequest, "validation_error", err.Error())
 			return
 		}
@@ -56,7 +66,7 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 	}
 }
 
-func validateSubmitRequest(req jobs.SubmitRequest, languageRegistry *languages.Registry) error {
+func validateSubmitRequest(req jobs.SubmitRequest, languageRegistry *languages.Registry, cfg config.Config) error {
 	switch {
 	case strings.TrimSpace(req.SubmissionID) == "":
 		return errors.New("submission_id is required")
@@ -74,12 +84,20 @@ func validateSubmitRequest(req jobs.SubmitRequest, languageRegistry *languages.R
 		return errors.New("callback_token is required")
 	case req.Limits.TimeMS <= 0:
 		return errors.New("limits.time_ms must be > 0")
+	case req.Limits.TimeMS > cfg.JudgeMaxTimeMS:
+		return errors.New("limits.time_ms exceeds maximum")
 	case req.Limits.MemoryMB <= 0:
 		return errors.New("limits.memory_mb must be > 0")
+	case req.Limits.MemoryMB > cfg.JudgeMaxMemoryMB:
+		return errors.New("limits.memory_mb exceeds maximum")
 	case req.Limits.OutputKB <= 0:
 		return errors.New("limits.output_kb must be > 0")
+	case req.Limits.OutputKB > cfg.JudgeMaxOutputKB:
+		return errors.New("limits.output_kb exceeds maximum")
 	case len(req.Tests) == 0:
 		return errors.New("tests must contain at least one test")
+	case len(req.Tests) > cfg.JudgeMaxTests:
+		return errors.New("tests exceeds maximum")
 	}
 
 	if !languageRegistry.IsSupported(req.Language, req.LanguageVersion) {
@@ -92,6 +110,9 @@ func validateSubmitRequest(req jobs.SubmitRequest, languageRegistry *languages.R
 		}
 		if test.Points < 0 {
 			return errors.New("tests[" + itoa(i) + "].points must be >= 0")
+		}
+		if len(test.Input)+len(test.ExpectedOutput) > cfg.JudgeMaxTestBytes {
+			return errors.New("tests[" + itoa(i) + "] payload exceeds maximum")
 		}
 	}
 

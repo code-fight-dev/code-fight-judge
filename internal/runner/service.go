@@ -51,8 +51,8 @@ type TestResult struct {
 	TestCaseID     string
 	Status         string
 	TimeMS         int
-	MemoryKB      int
-	ExitCode      int
+	MemoryKB       int
+	ExitCode       int
 	CheckerMessage string
 }
 
@@ -145,6 +145,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
+			Env:          restrictedRuntimeEnv(job.Language),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("compile sandbox: %w", err)
@@ -176,7 +177,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			Stderr:        compileResult.Stderr,
 			DurationMS:    compileResult.DurationMS,
 			CompileTimeMS: int(compileResult.DurationMS),
-			RunTimeMS:      0,
+			RunTimeMS:     0,
 			PeakMemoryKB:  0,
 			Verdict:       "compile_error",
 			PassedTests:   0,
@@ -187,13 +188,37 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		}, nil
 	}
 
+	if s.cfg.JudgeMaxOutputDirMB > 0 {
+		outputKB, err := dirSizeKB(outputDir)
+		if err != nil {
+			return nil, fmt.Errorf("measure output dir: %w", err)
+		}
+		if outputKB > s.cfg.JudgeMaxOutputDirMB*1024 {
+			return &RunResult{
+				ExitCode:      -1,
+				Stdout:        compileResult.Stdout,
+				Stderr:        compileResult.Stderr,
+				DurationMS:    compileResult.DurationMS,
+				CompileTimeMS: int(compileResult.DurationMS),
+				RunTimeMS:     0,
+				PeakMemoryKB:  0,
+				Verdict:       "memory_limit_exceeded",
+				PassedTests:   0,
+				TotalTests:    totalTests,
+				Score:         0,
+				ErrorMessage:  "output directory limit exceeded",
+				TestResults:   []TestResult{},
+			}, nil
+		}
+	}
+
 	result := &RunResult{
 		ExitCode:      0,
 		Stdout:        "",
 		Stderr:        "",
 		DurationMS:    compileResult.DurationMS,
 		CompileTimeMS: int(compileResult.DurationMS),
-		RunTimeMS:      0,
+		RunTimeMS:     0,
 		PeakMemoryKB:  0,
 
 		Verdict:     "accepted",
@@ -223,6 +248,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
 			Timeout:      time.Duration(job.Limits.TimeMS) * time.Millisecond,
+			Env:          restrictedRuntimeEnv(job.Language),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("run test sandbox: %w", err)
@@ -293,6 +319,46 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 	}
 
 	return result, nil
+}
+
+func restrictedRuntimeEnv(language string) map[string]string {
+	env := map[string]string{
+		"HOME":   "/tmp",
+		"TMPDIR": "/tmp",
+	}
+
+	if languages.NormalizeLanguage(language) == languages.PythonLanguage {
+		env["PYTHONNOUSERSITE"] = "1"
+		env["PYTHONDONTWRITEBYTECODE"] = "1"
+		env["PYTHONUNBUFFERED"] = "1"
+	}
+
+	return env
+}
+
+func dirSizeKB(root string) (int, error) {
+	var total int64
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		total += info.Size()
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	return int((total + 1023) / 1024), nil
 }
 
 func normalizeOutput(value string) string {
