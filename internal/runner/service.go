@@ -301,7 +301,12 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			break
 		}
 
-		if normalizeOutput(runResult.Stdout) == normalizeOutput(test.ExpectedOutput) {
+		if test.SkipOutputCheck {
+			testResult.Status = "accepted"
+			testResult.CheckerMessage = "output check skipped"
+			result.PassedTests++
+			result.Score += test.Points
+		} else if normalizeOutput(runResult.Stdout) == normalizeOutput(test.ExpectedOutput) {
 			testResult.Status = "accepted"
 			result.PassedTests++
 			result.Score += test.Points
