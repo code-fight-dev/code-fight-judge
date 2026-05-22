@@ -137,7 +137,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			Command:       language.CompileCommand,
 
 			CPUCount:    s.cfg.JudgeCPUCount,
-			MemoryMB:    memoryMB,
+			MemoryMB:    compileMemoryMB(s.cfg, memoryMB),
 			PidsLimit:   s.cfg.JudgeDefaultPids,
 			NetworkNone: true,
 
@@ -145,11 +145,30 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
+			Timeout:      compileTimeout(s.cfg),
 			Env:          restrictedRuntimeEnv(job.Language),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("compile sandbox: %w", err)
 		}
+	}
+
+	if compileResult.TimedOut {
+		return &RunResult{
+			ExitCode:      compileResult.ExitCode,
+			Stdout:        compileResult.Stdout,
+			Stderr:        compileResult.Stderr,
+			DurationMS:    compileResult.DurationMS,
+			CompileTimeMS: int(compileResult.DurationMS),
+			RunTimeMS:     0,
+			PeakMemoryKB:  0,
+			Verdict:       "time_limit_exceeded",
+			PassedTests:   0,
+			TotalTests:    totalTests,
+			Score:         0,
+			ErrorMessage:  "compile time limit exceeded",
+			TestResults:   []TestResult{},
+		}, nil
 	}
 
 	if compileResult.OOMKilled || compileResult.ExitCode == 137 {
@@ -339,6 +358,28 @@ func restrictedRuntimeEnv(language string) map[string]string {
 	}
 
 	return env
+}
+
+func compileMemoryMB(cfg config.Config, runMemoryMB int) int {
+	if cfg.JudgeMaxMemoryMB > 0 {
+		return cfg.JudgeMaxMemoryMB
+	}
+	if cfg.JudgeDefaultMemoryMB > 0 && cfg.JudgeDefaultMemoryMB > runMemoryMB {
+		return cfg.JudgeDefaultMemoryMB
+	}
+	if runMemoryMB > 0 {
+		return runMemoryMB
+	}
+
+	return 256
+}
+
+func compileTimeout(cfg config.Config) time.Duration {
+	if cfg.JudgeMaxTimeMS > 0 {
+		return time.Duration(cfg.JudgeMaxTimeMS) * time.Millisecond
+	}
+
+	return 0
 }
 
 func writeSourceFiles(workspaceDir string, language languages.Definition, sourceCode string) error {
