@@ -253,22 +253,10 @@ func TestWriteSourceFilesWrapsGoSolveFunction(t *testing.T) {
 		Language:   languages.GoLanguage,
 		SourceFile: "main.go",
 	}
-	sourceCode := "func Solve(input string) string {\n\treturn strings.TrimSpace(input)\n}\n"
+	sourceCode := "import \"strings\"\n\nfunc Solve(input string) string {\n\treturn strings.TrimSpace(input)\n}\n"
 
 	if err := writeSourceFiles(workspaceDir, language, sourceCode); err != nil {
 		t.Fatalf("writeSourceFiles() error = %v", err)
-	}
-
-	solution, err := os.ReadFile(filepath.Join(workspaceDir, "solution.go"))
-	if err != nil {
-		t.Fatalf("read solution.go: %v", err)
-	}
-	solutionSource := string(solution)
-	if !strings.HasPrefix(solutionSource, "package main\n\n") {
-		t.Fatalf("solution.go missing package main prefix:\n%s", solutionSource)
-	}
-	if !strings.Contains(solutionSource, sourceCode) {
-		t.Fatalf("solution.go does not contain source code:\n%s", solutionSource)
 	}
 
 	mainFile, err := os.ReadFile(filepath.Join(workspaceDir, "main.go"))
@@ -277,8 +265,61 @@ func TestWriteSourceFilesWrapsGoSolveFunction(t *testing.T) {
 	}
 	mainSource := string(mainFile)
 	for _, want := range []string{
+		`package main`,
+		`"fmt"`,
+		`"io"`,
+		`"os"`,
+		`"strings"`,
+		`func Solve(input string) string`,
 		`input, err := io.ReadAll(os.Stdin)`,
 		`fmt.Print(Solve(string(input)))`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("main.go does not contain %q\n%s", want, mainSource)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(workspaceDir, "solution.go")); !os.IsNotExist(err) {
+		t.Fatalf("solution.go exists for wrapped Go program, err=%v", err)
+	}
+}
+
+func TestWriteSourceFilesWrapsGoStarterImportsInSameFile(t *testing.T) {
+	workspaceDir := t.TempDir()
+	language := languages.Definition{
+		Language:   languages.GoLanguage,
+		SourceFile: "main.go",
+	}
+	sourceCode := `package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+	"strconv"
+	"strings"
+)
+
+func Solve(input string) string {
+	return strconv.Itoa(len(strings.TrimSpace(input)))
+}
+`
+
+	if err := writeSourceFiles(workspaceDir, language, sourceCode); err != nil {
+		t.Fatalf("writeSourceFiles() error = %v", err)
+	}
+
+	mainFile, err := os.ReadFile(filepath.Join(workspaceDir, "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	mainSource := string(mainFile)
+	for _, want := range []string{
+		`"fmt"`,
+		`"io"`,
+		`"os"`,
+		`func Solve(input string) string`,
+		`func main()`,
 	} {
 		if !strings.Contains(mainSource, want) {
 			t.Fatalf("main.go does not contain %q\n%s", want, mainSource)

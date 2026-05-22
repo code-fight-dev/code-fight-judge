@@ -3,9 +3,14 @@ package runner
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -390,13 +395,8 @@ func writeSourceFiles(workspaceDir string, language languages.Definition, source
 			return os.WriteFile(mainFile, []byte(sourceCode), 0644)
 		}
 
-		solutionFile := filepath.Join(workspaceDir, "solution.go")
-		if err := os.WriteFile(solutionFile, []byte(ensureGoPackage(sourceCode)), 0644); err != nil {
-			return err
-		}
-
 		mainFile := filepath.Join(workspaceDir, language.SourceFile)
-		return os.WriteFile(mainFile, []byte(goSolveHarness), 0644)
+		return os.WriteFile(mainFile, []byte(buildGoSolveProgram(sourceCode)), 0644)
 
 	case languages.PythonLanguage:
 		solutionFile := filepath.Join(workspaceDir, "solution.py")
@@ -427,15 +427,83 @@ func ensureGoPackage(sourceCode string) string {
 	return "package main\n\n" + sourceCode
 }
 
-const goSolveHarness = `package main
+func buildGoSolveProgram(sourceCode string) string {
+	sourceCode = ensureGoPackage(sourceCode)
+	sourceCode = ensureGoHarnessImports(sourceCode)
+	sourceCode = strings.TrimRight(sourceCode, "\r\n\t ") + "\n\n" + goSolveMain
 
-import (
-	"fmt"
-	"io"
-	"os"
-)
+	formatted, err := format.Source([]byte(sourceCode))
+	if err != nil {
+		return sourceCode
+	}
 
-func main() {
+	return string(formatted)
+}
+
+func ensureGoHarnessImports(sourceCode string) string {
+	const (
+		fmtImport = "fmt"
+		ioImport  = "io"
+		osImport  = "os"
+	)
+
+	required := []string{fmtImport, ioImport, osImport}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "solution.go", sourceCode, parser.ParseComments)
+	if err != nil {
+		return sourceCode
+	}
+
+	existing := make(map[string]struct{}, len(file.Imports))
+	for _, importSpec := range file.Imports {
+		path, err := strconv.Unquote(importSpec.Path.Value)
+		if err != nil {
+			continue
+		}
+		existing[path] = struct{}{}
+	}
+
+	missing := make([]string, 0, len(required))
+	for _, path := range required {
+		if _, ok := existing[path]; !ok {
+			missing = append(missing, path)
+		}
+	}
+	if len(missing) == 0 {
+		return sourceCode
+	}
+
+	insertLines := make([]string, 0, len(missing))
+	for _, path := range missing {
+		insertLines = append(insertLines, fmt.Sprintf("\t%q\n", path))
+	}
+	insertText := strings.Join(insertLines, "")
+
+	for _, decl := range file.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.IMPORT {
+			continue
+		}
+
+		if genDecl.Lparen.IsValid() {
+			offset := fset.Position(genDecl.Rparen).Offset
+			return sourceCode[:offset] + insertText + sourceCode[offset:]
+		}
+
+		start := fset.Position(genDecl.Pos()).Offset
+		end := fset.Position(genDecl.End()).Offset
+		importText := strings.TrimSpace(sourceCode[start:end])
+		importText = strings.TrimSpace(strings.TrimPrefix(importText, "import"))
+		replacement := "import (\n\t" + importText + "\n" + insertText + ")"
+
+		return sourceCode[:start] + replacement + sourceCode[end:]
+	}
+
+	offset := fset.Position(file.Name.End()).Offset
+	return sourceCode[:offset] + "\n\nimport (\n" + insertText + ")" + sourceCode[offset:]
+}
+
+const goSolveMain = `func main() {
 	input, err := io.ReadAll(os.Stdin)
 	if err != nil {
 		panic(err)
