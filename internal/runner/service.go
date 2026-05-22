@@ -259,7 +259,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			WorkDirHost:       workspaceDir,
 			OutputDirHost:     outputDir,
 			OutputDirReadOnly: true,
-			Command:           language.RunCommand,
+			Command:           commandWithRuntimeTimeout(language.RunCommand, job.Limits.TimeMS),
 			Stdin:             test.Input,
 
 			CPUCount:    s.cfg.JudgeCPUCount,
@@ -271,7 +271,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
-			Timeout:      time.Duration(job.Limits.TimeMS) * time.Millisecond,
+			Timeout:      sandboxTimeout(s.cfg, job.Limits.TimeMS),
 			Env:          restrictedRuntimeEnv(job.Language),
 		})
 		if err != nil {
@@ -293,6 +293,17 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		}
 
 		if runResult.TimedOut {
+			testResult.Status = "time_limit_exceeded"
+			testResult.CheckerMessage = "time limit exceeded"
+
+			result.Verdict = "time_limit_exceeded"
+			result.ErrorMessage = "time limit exceeded"
+			result.TestResults = append(result.TestResults, testResult)
+
+			break
+		}
+
+		if runResult.ExitCode == runtimeTimeoutExitCode {
 			testResult.Status = "time_limit_exceeded"
 			testResult.CheckerMessage = "time limit exceeded"
 
@@ -386,6 +397,71 @@ func compileTimeout(cfg config.Config) time.Duration {
 
 	return 0
 }
+
+func sandboxTimeout(cfg config.Config, runTimeMS int) time.Duration {
+	guard := compileTimeout(cfg)
+	if guard <= 0 {
+		return 0
+	}
+
+	runTimeout := time.Duration(runTimeMS) * time.Millisecond
+	if runTimeout <= 0 {
+		return guard
+	}
+
+	const startupGrace = 5 * time.Second
+	if guardedRunTimeout := runTimeout + startupGrace; guardedRunTimeout > guard {
+		return guardedRunTimeout
+	}
+
+	return guard
+}
+
+const runtimeTimeoutExitCode = 124
+
+func commandWithRuntimeTimeout(command []string, timeMS int) []string {
+	if timeMS <= 0 || len(command) == 0 {
+		return append([]string(nil), command...)
+	}
+
+	wrapped := []string{
+		"sh",
+		"-c",
+		runtimeTimeoutScript,
+		"judge-runtime-timeout",
+		formatTimeoutSeconds(timeMS),
+	}
+	wrapped = append(wrapped, command...)
+
+	return wrapped
+}
+
+func formatTimeoutSeconds(timeMS int) string {
+	seconds := float64(timeMS) / 1000
+	return strconv.FormatFloat(seconds, 'f', 3, 64)
+}
+
+const runtimeTimeoutScript = `timeout_seconds="$1"
+shift
+flag="/tmp/judge-runtime-timeout-$$"
+"$@" &
+pid="$!"
+(
+	sleep "$timeout_seconds"
+	echo 1 > "$flag"
+	kill -KILL "$pid" 2>/dev/null
+) &
+killer="$!"
+wait "$pid"
+status="$?"
+kill "$killer" 2>/dev/null
+wait "$killer" 2>/dev/null
+if [ -f "$flag" ]; then
+	rm -f "$flag"
+	exit 124
+fi
+exit "$status"
+`
 
 func writeSourceFiles(workspaceDir string, language languages.Definition, sourceCode string) error {
 	switch languages.NormalizeLanguage(language.Language) {

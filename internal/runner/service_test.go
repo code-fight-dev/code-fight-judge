@@ -88,8 +88,11 @@ func TestRunSkipsCompileForPython(t *testing.T) {
 	if len(request.Command) == 0 {
 		t.Fatal("run request Command is empty")
 	}
-	if request.Command[0] != "python3" {
-		t.Fatalf("run request Command[0] = %q, want python3", request.Command[0])
+	if request.Command[0] != "sh" {
+		t.Fatalf("run request Command[0] = %q, want sh", request.Command[0])
+	}
+	if got, want := request.Command[len(request.Command)-3:], []string{"python3", "-B", "/workspace/main.py"}; !stringSlicesEqual(got, want) {
+		t.Fatalf("run command target = %#v, want %#v", got, want)
 	}
 }
 
@@ -147,7 +150,7 @@ func TestRunUsesMaxMemoryForCompileAndTaskMemoryForRun(t *testing.T) {
 	if got, want := executor.requests[1].MemoryMB, 128; got != want {
 		t.Fatalf("run MemoryMB = %d, want %d", got, want)
 	}
-	if got, want := executor.requests[1].Timeout, time.Second; got != want {
+	if got, want := executor.requests[1].Timeout, 10*time.Second; got != want {
 		t.Fatalf("run Timeout = %s, want %s", got, want)
 	}
 }
@@ -210,6 +213,113 @@ func TestRunReportsCompileTimeout(t *testing.T) {
 	}
 }
 
+func TestRunWrapsRuntimeCommandWithInContainerTimeout(t *testing.T) {
+	executor := &fakeExecutor{}
+	registry := languages.NewDefaultRegistry(languages.RuntimeImages{
+		Go:     "judge-go:test",
+		Python: "judge-python:test",
+	})
+	service := NewService(config.Config{
+		JudgeWorkDir:         t.TempDir(),
+		JudgeRuntime:         "runsc",
+		JudgeCPUCount:        1,
+		JudgeDefaultMemoryMB: 256,
+		JudgeMaxMemoryMB:     1024,
+		JudgeMaxTimeMS:       10000,
+		JudgeDefaultPids:     64,
+		JudgeDefaultTmpfsMB:  64,
+	}, executor, registry)
+
+	_, err := service.Run(context.Background(), &jobs.Job{
+		ID:              "job-go",
+		Language:        "go",
+		LanguageVersion: "1.24",
+		SourceCode:      "package main\n\nfunc Solve(input string) string { return \"ok\" }\n",
+		Limits: jobs.Limits{
+			TimeMS:   1500,
+			MemoryMB: 128,
+			OutputKB: 64,
+		},
+		Tests: []jobs.TestCase{
+			{
+				ID:             "case-1",
+				Input:          "",
+				ExpectedOutput: "ok",
+				Points:         1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(executor.requests) != 2 {
+		t.Fatalf("executor calls = %d, want compile + run", len(executor.requests))
+	}
+
+	runRequest := executor.requests[1]
+	if got, want := runRequest.Command[:5], []string{"sh", "-c", runtimeTimeoutScript, "judge-runtime-timeout", "1.500"}; !stringSlicesEqual(got, want) {
+		t.Fatalf("run command prefix = %#v, want %#v", got, want)
+	}
+	if got, want := runRequest.Command[len(runRequest.Command)-3:], []string{"sh", "-c", "/output/program"}; !stringSlicesEqual(got, want) {
+		t.Fatalf("run command target = %#v, want %#v", got, want)
+	}
+	if got, want := runRequest.Timeout, 10*time.Second; got != want {
+		t.Fatalf("run sandbox Timeout = %s, want %s", got, want)
+	}
+}
+
+func TestRunReportsInContainerRuntimeTimeout(t *testing.T) {
+	executor := &fakeExecutor{
+		results: []*sandbox.ExecuteResult{
+			{ExitCode: 0},
+			{ExitCode: runtimeTimeoutExitCode, DurationMS: 1500},
+		},
+	}
+	registry := languages.NewDefaultRegistry(languages.RuntimeImages{
+		Go:     "judge-go:test",
+		Python: "judge-python:test",
+	})
+	service := NewService(config.Config{
+		JudgeWorkDir:         t.TempDir(),
+		JudgeRuntime:         "runsc",
+		JudgeCPUCount:        1,
+		JudgeDefaultMemoryMB: 256,
+		JudgeMaxMemoryMB:     1024,
+		JudgeMaxTimeMS:       10000,
+		JudgeDefaultPids:     64,
+		JudgeDefaultTmpfsMB:  64,
+	}, executor, registry)
+
+	result, err := service.Run(context.Background(), &jobs.Job{
+		ID:              "job-go",
+		Language:        "go",
+		LanguageVersion: "1.24",
+		SourceCode:      "package main\n\nfunc Solve(input string) string { return \"ok\" }\n",
+		Limits: jobs.Limits{
+			TimeMS:   1500,
+			MemoryMB: 128,
+			OutputKB: 64,
+		},
+		Tests: []jobs.TestCase{
+			{
+				ID:             "case-1",
+				Input:          "",
+				ExpectedOutput: "ok",
+				Points:         1,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Verdict != "time_limit_exceeded" {
+		t.Fatalf("Run().Verdict = %q, want time_limit_exceeded", result.Verdict)
+	}
+	if result.ErrorMessage != "time limit exceeded" {
+		t.Fatalf("Run().ErrorMessage = %q, want time limit exceeded", result.ErrorMessage)
+	}
+}
+
 func TestWriteSourceFilesWrapsPythonSolveFunction(t *testing.T) {
 	workspaceDir := t.TempDir()
 	language := languages.Definition{
@@ -245,6 +355,18 @@ func TestWriteSourceFilesWrapsPythonSolveFunction(t *testing.T) {
 			t.Fatalf("main.py does not contain %q\n%s", want, mainSource)
 		}
 	}
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestWriteSourceFilesWrapsGoSolveFunction(t *testing.T) {
