@@ -3,8 +3,14 @@ package runner
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/format"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,8 +105,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		return nil, fmt.Errorf("chmod output dir: %w", err)
 	}
 
-	mainFile := filepath.Join(workspaceDir, language.SourceFile)
-	if err := os.WriteFile(mainFile, []byte(job.SourceCode), 0644); err != nil {
+	if err := writeSourceFiles(workspaceDir, language, job.SourceCode); err != nil {
 		return nil, fmt.Errorf("write source file: %w", err)
 	}
 
@@ -137,7 +142,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			Command:       language.CompileCommand,
 
 			CPUCount:    s.cfg.JudgeCPUCount,
-			MemoryMB:    memoryMB,
+			MemoryMB:    compileMemoryMB(s.cfg, memoryMB),
 			PidsLimit:   s.cfg.JudgeDefaultPids,
 			NetworkNone: true,
 
@@ -145,11 +150,30 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
+			Timeout:      compileTimeout(s.cfg),
 			Env:          restrictedRuntimeEnv(job.Language),
 		})
 		if err != nil {
 			return nil, fmt.Errorf("compile sandbox: %w", err)
 		}
+	}
+
+	if compileResult.TimedOut {
+		return &RunResult{
+			ExitCode:      compileResult.ExitCode,
+			Stdout:        compileResult.Stdout,
+			Stderr:        compileResult.Stderr,
+			DurationMS:    compileResult.DurationMS,
+			CompileTimeMS: int(compileResult.DurationMS),
+			RunTimeMS:     0,
+			PeakMemoryKB:  0,
+			Verdict:       "time_limit_exceeded",
+			PassedTests:   0,
+			TotalTests:    totalTests,
+			Score:         0,
+			ErrorMessage:  "compile time limit exceeded",
+			TestResults:   []TestResult{},
+		}, nil
 	}
 
 	if compileResult.OOMKilled || compileResult.ExitCode == 137 {
@@ -235,7 +259,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			WorkDirHost:       workspaceDir,
 			OutputDirHost:     outputDir,
 			OutputDirReadOnly: true,
-			Command:           language.RunCommand,
+			Command:           commandWithRuntimeTimeout(language.RunCommand, job.Limits.TimeMS),
 			Stdin:             test.Input,
 
 			CPUCount:    s.cfg.JudgeCPUCount,
@@ -247,7 +271,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
-			Timeout:      time.Duration(job.Limits.TimeMS) * time.Millisecond,
+			Timeout:      sandboxTimeout(s.cfg, job.Limits.TimeMS),
 			Env:          restrictedRuntimeEnv(job.Language),
 		})
 		if err != nil {
@@ -269,6 +293,17 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		}
 
 		if runResult.TimedOut {
+			testResult.Status = "time_limit_exceeded"
+			testResult.CheckerMessage = "time limit exceeded"
+
+			result.Verdict = "time_limit_exceeded"
+			result.ErrorMessage = "time limit exceeded"
+			result.TestResults = append(result.TestResults, testResult)
+
+			break
+		}
+
+		if runResult.ExitCode == runtimeTimeoutExitCode {
 			testResult.Status = "time_limit_exceeded"
 			testResult.CheckerMessage = "time limit exceeded"
 
@@ -340,6 +375,238 @@ func restrictedRuntimeEnv(language string) map[string]string {
 
 	return env
 }
+
+func compileMemoryMB(cfg config.Config, runMemoryMB int) int {
+	if cfg.JudgeMaxMemoryMB > 0 {
+		return cfg.JudgeMaxMemoryMB
+	}
+	if cfg.JudgeDefaultMemoryMB > 0 && cfg.JudgeDefaultMemoryMB > runMemoryMB {
+		return cfg.JudgeDefaultMemoryMB
+	}
+	if runMemoryMB > 0 {
+		return runMemoryMB
+	}
+
+	return 256
+}
+
+func compileTimeout(cfg config.Config) time.Duration {
+	if cfg.JudgeMaxTimeMS > 0 {
+		return time.Duration(cfg.JudgeMaxTimeMS) * time.Millisecond
+	}
+
+	return 0
+}
+
+func sandboxTimeout(cfg config.Config, runTimeMS int) time.Duration {
+	guard := compileTimeout(cfg)
+	if guard <= 0 {
+		return 0
+	}
+
+	runTimeout := time.Duration(runTimeMS) * time.Millisecond
+	if runTimeout <= 0 {
+		return guard
+	}
+
+	const startupGrace = 5 * time.Second
+	if guardedRunTimeout := runTimeout + startupGrace; guardedRunTimeout > guard {
+		return guardedRunTimeout
+	}
+
+	return guard
+}
+
+const runtimeTimeoutExitCode = 124
+
+func commandWithRuntimeTimeout(command []string, timeMS int) []string {
+	if timeMS <= 0 || len(command) == 0 {
+		return append([]string(nil), command...)
+	}
+
+	wrapped := []string{
+		"sh",
+		"-c",
+		runtimeTimeoutScript,
+		"judge-runtime-timeout",
+		formatTimeoutSeconds(timeMS),
+	}
+	wrapped = append(wrapped, command...)
+
+	return wrapped
+}
+
+func formatTimeoutSeconds(timeMS int) string {
+	seconds := float64(timeMS) / 1000
+	return strconv.FormatFloat(seconds, 'f', 3, 64)
+}
+
+const runtimeTimeoutScript = `timeout_seconds="$1"
+shift
+flag="/tmp/judge-runtime-timeout-$$"
+input_file="/tmp/judge-runtime-input-$$"
+cat > "$input_file"
+"$@" < "$input_file" &
+pid="$!"
+(
+	sleep "$timeout_seconds"
+	echo 1 > "$flag"
+	kill -KILL "$pid" 2>/dev/null
+) &
+killer="$!"
+wait "$pid"
+status="$?"
+kill "$killer" 2>/dev/null
+wait "$killer" 2>/dev/null
+if [ -f "$flag" ]; then
+	rm -f "$flag"
+	rm -f "$input_file"
+	exit 124
+fi
+rm -f "$input_file"
+exit "$status"
+`
+
+func writeSourceFiles(workspaceDir string, language languages.Definition, sourceCode string) error {
+	switch languages.NormalizeLanguage(language.Language) {
+	case languages.GoLanguage:
+		if hasGoMainFunction(sourceCode) {
+			mainFile := filepath.Join(workspaceDir, language.SourceFile)
+			return os.WriteFile(mainFile, []byte(sourceCode), 0644)
+		}
+
+		mainFile := filepath.Join(workspaceDir, language.SourceFile)
+		return os.WriteFile(mainFile, []byte(buildGoSolveProgram(sourceCode)), 0644)
+
+	case languages.PythonLanguage:
+		solutionFile := filepath.Join(workspaceDir, "solution.py")
+		if err := os.WriteFile(solutionFile, []byte(sourceCode), 0644); err != nil {
+			return err
+		}
+
+		mainFile := filepath.Join(workspaceDir, language.SourceFile)
+		return os.WriteFile(mainFile, []byte(pythonSolveHarness), 0644)
+
+	default:
+		mainFile := filepath.Join(workspaceDir, language.SourceFile)
+		return os.WriteFile(mainFile, []byte(sourceCode), 0644)
+	}
+}
+
+var goMainFunctionPattern = regexp.MustCompile(`(?m)\bfunc\s+main\s*\(`)
+
+func hasGoMainFunction(sourceCode string) bool {
+	return goMainFunctionPattern.MatchString(sourceCode)
+}
+
+func ensureGoPackage(sourceCode string) string {
+	if strings.HasPrefix(strings.TrimSpace(sourceCode), "package ") {
+		return sourceCode
+	}
+
+	return "package main\n\n" + sourceCode
+}
+
+func buildGoSolveProgram(sourceCode string) string {
+	sourceCode = ensureGoPackage(sourceCode)
+	sourceCode = ensureGoHarnessImports(sourceCode)
+	sourceCode = strings.TrimRight(sourceCode, "\r\n\t ") + "\n\n" + goSolveMain
+
+	formatted, err := format.Source([]byte(sourceCode))
+	if err != nil {
+		return sourceCode
+	}
+
+	return string(formatted)
+}
+
+func ensureGoHarnessImports(sourceCode string) string {
+	const (
+		fmtImport = "fmt"
+		ioImport  = "io"
+		osImport  = "os"
+	)
+
+	required := []string{fmtImport, ioImport, osImport}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "solution.go", sourceCode, parser.ParseComments)
+	if err != nil {
+		return sourceCode
+	}
+
+	existing := make(map[string]struct{}, len(file.Imports))
+	for _, importSpec := range file.Imports {
+		path, err := strconv.Unquote(importSpec.Path.Value)
+		if err != nil {
+			continue
+		}
+		existing[path] = struct{}{}
+	}
+
+	missing := make([]string, 0, len(required))
+	for _, path := range required {
+		if _, ok := existing[path]; !ok {
+			missing = append(missing, path)
+		}
+	}
+	if len(missing) == 0 {
+		return sourceCode
+	}
+
+	insertLines := make([]string, 0, len(missing))
+	for _, path := range missing {
+		insertLines = append(insertLines, fmt.Sprintf("\t%q\n", path))
+	}
+	insertText := strings.Join(insertLines, "")
+
+	for _, decl := range file.Decls {
+		genDecl, ok := decl.(*ast.GenDecl)
+		if !ok || genDecl.Tok != token.IMPORT {
+			continue
+		}
+
+		if genDecl.Lparen.IsValid() {
+			offset := fset.Position(genDecl.Rparen).Offset
+			return sourceCode[:offset] + insertText + sourceCode[offset:]
+		}
+
+		start := fset.Position(genDecl.Pos()).Offset
+		end := fset.Position(genDecl.End()).Offset
+		importText := strings.TrimSpace(sourceCode[start:end])
+		importText = strings.TrimSpace(strings.TrimPrefix(importText, "import"))
+		replacement := "import (\n\t" + importText + "\n" + insertText + ")"
+
+		return sourceCode[:start] + replacement + sourceCode[end:]
+	}
+
+	offset := fset.Position(file.Name.End()).Offset
+	return sourceCode[:offset] + "\n\nimport (\n" + insertText + ")" + sourceCode[offset:]
+}
+
+const goSolveMain = `func main() {
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Print(Solve(string(input)))
+}
+`
+
+const pythonSolveHarness = `import sys
+
+namespace = {"__name__": "__submission__"}
+with open("/workspace/solution.py", "r", encoding="utf-8") as source_file:
+    exec(compile(source_file.read(), "/workspace/solution.py", "exec"), namespace)
+
+solve = namespace.get("solve")
+if not callable(solve):
+    raise TypeError("solve(input_data) is not defined")
+
+result = solve(sys.stdin.read())
+if result is not None:
+    sys.stdout.write(str(result))
+`
 
 func dirSizeKB(root string) (int, error) {
 	var total int64
