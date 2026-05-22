@@ -458,6 +458,49 @@ func Solve(input string) string {
 	}
 }
 
+func TestWriteSourceFilesKeepsGoPackageAfterLeadingComments(t *testing.T) {
+	workspaceDir := t.TempDir()
+	language := languages.Definition{
+		Language:   languages.GoLanguage,
+		SourceFile: "main.go",
+	}
+	sourceCode := `// Trade Ledger Balance
+// Parse stdin and return the answer as a string.
+package main
+
+import "strconv"
+
+func Solve(input string) string {
+	return strconv.Itoa(len(input))
+}
+`
+
+	if err := writeSourceFiles(workspaceDir, language, sourceCode); err != nil {
+		t.Fatalf("writeSourceFiles() error = %v", err)
+	}
+
+	mainFile, err := os.ReadFile(filepath.Join(workspaceDir, "main.go"))
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	mainSource := string(mainFile)
+	if count := strings.Count(mainSource, "package main"); count != 1 {
+		t.Fatalf("package main count = %d, want 1\n%s", count, mainSource)
+	}
+	for _, want := range []string{
+		`"fmt"`,
+		`"io"`,
+		`"os"`,
+		`"strconv"`,
+		`func Solve(input string) string`,
+		`func main()`,
+	} {
+		if !strings.Contains(mainSource, want) {
+			t.Fatalf("main.go does not contain %q\n%s", want, mainSource)
+		}
+	}
+}
+
 func TestWriteSourceFilesKeepsGoMainProgram(t *testing.T) {
 	workspaceDir := t.TempDir()
 	language := languages.Definition{
