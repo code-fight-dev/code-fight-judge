@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -99,8 +100,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		return nil, fmt.Errorf("chmod output dir: %w", err)
 	}
 
-	mainFile := filepath.Join(workspaceDir, language.SourceFile)
-	if err := os.WriteFile(mainFile, []byte(job.SourceCode), 0644); err != nil {
+	if err := writeSourceFiles(workspaceDir, language, job.SourceCode); err != nil {
 		return nil, fmt.Errorf("write source file: %w", err)
 	}
 
@@ -340,6 +340,84 @@ func restrictedRuntimeEnv(language string) map[string]string {
 
 	return env
 }
+
+func writeSourceFiles(workspaceDir string, language languages.Definition, sourceCode string) error {
+	switch languages.NormalizeLanguage(language.Language) {
+	case languages.GoLanguage:
+		if hasGoMainFunction(sourceCode) {
+			mainFile := filepath.Join(workspaceDir, language.SourceFile)
+			return os.WriteFile(mainFile, []byte(sourceCode), 0644)
+		}
+
+		solutionFile := filepath.Join(workspaceDir, "solution.go")
+		if err := os.WriteFile(solutionFile, []byte(ensureGoPackage(sourceCode)), 0644); err != nil {
+			return err
+		}
+
+		mainFile := filepath.Join(workspaceDir, language.SourceFile)
+		return os.WriteFile(mainFile, []byte(goSolveHarness), 0644)
+
+	case languages.PythonLanguage:
+		solutionFile := filepath.Join(workspaceDir, "solution.py")
+		if err := os.WriteFile(solutionFile, []byte(sourceCode), 0644); err != nil {
+			return err
+		}
+
+		mainFile := filepath.Join(workspaceDir, language.SourceFile)
+		return os.WriteFile(mainFile, []byte(pythonSolveHarness), 0644)
+
+	default:
+		mainFile := filepath.Join(workspaceDir, language.SourceFile)
+		return os.WriteFile(mainFile, []byte(sourceCode), 0644)
+	}
+}
+
+var goMainFunctionPattern = regexp.MustCompile(`(?m)\bfunc\s+main\s*\(`)
+
+func hasGoMainFunction(sourceCode string) bool {
+	return goMainFunctionPattern.MatchString(sourceCode)
+}
+
+func ensureGoPackage(sourceCode string) string {
+	if strings.HasPrefix(strings.TrimSpace(sourceCode), "package ") {
+		return sourceCode
+	}
+
+	return "package main\n\n" + sourceCode
+}
+
+const goSolveHarness = `package main
+
+import (
+	"fmt"
+	"io"
+	"os"
+)
+
+func main() {
+	input, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Print(Solve(string(input)))
+}
+`
+
+const pythonSolveHarness = `import sys
+
+namespace = {"__name__": "__submission__"}
+with open("/workspace/solution.py", "r", encoding="utf-8") as source_file:
+    exec(compile(source_file.read(), "/workspace/solution.py", "exec"), namespace)
+
+solve = namespace.get("solve")
+if not callable(solve):
+    raise TypeError("solve(input_data) is not defined")
+
+result = solve(sys.stdin.read())
+if result is not None:
+    sys.stdout.write(str(result))
+`
 
 func dirSizeKB(root string) (int, error) {
 	var total int64
