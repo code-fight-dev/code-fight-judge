@@ -266,6 +266,15 @@ func TestRunWrapsRuntimeCommandWithInContainerTimeout(t *testing.T) {
 	if got, want := runRequest.Timeout, 10*time.Second; got != want {
 		t.Fatalf("run sandbox Timeout = %s, want %s", got, want)
 	}
+	for _, want := range []string{
+		`cat > "$input_file"`,
+		`"$@" < "$input_file" &`,
+		`rm -f "$input_file"`,
+	} {
+		if !strings.Contains(runtimeTimeoutScript, want) {
+			t.Fatalf("runtime timeout script does not contain %q\n%s", want, runtimeTimeoutScript)
+		}
+	}
 }
 
 func TestRunReportsInContainerRuntimeTimeout(t *testing.T) {

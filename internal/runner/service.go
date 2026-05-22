@@ -444,7 +444,9 @@ func formatTimeoutSeconds(timeMS int) string {
 const runtimeTimeoutScript = `timeout_seconds="$1"
 shift
 flag="/tmp/judge-runtime-timeout-$$"
-"$@" &
+input_file="/tmp/judge-runtime-input-$$"
+cat > "$input_file"
+"$@" < "$input_file" &
 pid="$!"
 (
 	sleep "$timeout_seconds"
@@ -458,8 +460,10 @@ kill "$killer" 2>/dev/null
 wait "$killer" 2>/dev/null
 if [ -f "$flag" ]; then
 	rm -f "$flag"
+	rm -f "$input_file"
 	exit 124
 fi
+rm -f "$input_file"
 exit "$status"
 `
 
