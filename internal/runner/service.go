@@ -494,13 +494,14 @@ func writeSourceFiles(workspaceDir string, language languages.Definition, source
 }
 
 var goMainFunctionPattern = regexp.MustCompile(`(?m)\bfunc\s+main\s*\(`)
+var goPackageClausePattern = regexp.MustCompile(`(?m)^\s*package\s+\w+\b`)
 
 func hasGoMainFunction(sourceCode string) bool {
 	return goMainFunctionPattern.MatchString(sourceCode)
 }
 
 func ensureGoPackage(sourceCode string) string {
-	if strings.HasPrefix(strings.TrimSpace(sourceCode), "package ") {
+	if goPackageClausePattern.MatchString(sourceCode) {
 		return sourceCode
 	}
 
