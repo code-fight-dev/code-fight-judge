@@ -14,6 +14,7 @@ import (
 	"code-fight-judge/internal/config"
 	apphttp "code-fight-judge/internal/http"
 	"code-fight-judge/internal/languages"
+	"code-fight-judge/internal/metrics"
 	"code-fight-judge/internal/queue"
 	"code-fight-judge/internal/runner"
 	"code-fight-judge/internal/sandbox"
@@ -44,17 +45,18 @@ func New() (*App, error) {
 	}
 
 	jobsRepo := storage.NewJobsRepo(db)
+	judgeMetrics := metrics.NewJudgeMetrics()
 	languageRegistry := languages.NewDefaultRegistry(languages.RuntimeImages{
 		Go:     cfg.JudgeGoImage,
 		Python: cfg.JudgePythonImage,
 	})
-	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg)
+	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg, judgeMetrics)
 	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
 	readiness := readinessChecker{
 		db:     db,
 		images: []string{cfg.JudgeGoImage, cfg.JudgePythonImage},
 	}
-	router := apphttp.NewRouter(cfg, jobsHandler, languagesHandler, readiness)
+	router := apphttp.NewRouter(cfg, jobsHandler, languagesHandler, readiness, judgeMetrics)
 
 	executor := sandbox.NewRunscExecutor()
 
@@ -65,6 +67,7 @@ func New() (*App, error) {
 		jobsRepo,
 		runnerSvc,
 		callbackClient,
+		judgeMetrics,
 		2*time.Second,
 		cfg.JudgeCallbackAttempts,
 		cfg.JudgeCallbackBackoff,

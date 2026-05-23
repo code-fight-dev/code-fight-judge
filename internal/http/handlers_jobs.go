@@ -17,13 +17,19 @@ type JobsHandler struct {
 	repo      *storage.JobsRepo
 	languages *languages.Registry
 	cfg       config.Config
+	metrics   JobMetrics
 }
 
-func NewJobsHandler(repo *storage.JobsRepo, languageRegistry *languages.Registry, cfg config.Config) *JobsHandler {
+type JobMetrics interface {
+	RecordJobCreated(language string)
+}
+
+func NewJobsHandler(repo *storage.JobsRepo, languageRegistry *languages.Registry, cfg config.Config, metrics JobMetrics) *JobsHandler {
 	return &JobsHandler{
 		repo:      repo,
 		languages: languageRegistry,
 		cfg:       cfg,
+		metrics:   metrics,
 	}
 }
 
@@ -55,6 +61,9 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 		if err != nil {
 			writeError(w, stdhttp.StatusInternalServerError, "storage_error", err.Error())
 			return
+		}
+		if h.metrics != nil {
+			h.metrics.RecordJobCreated(req.Language)
 		}
 
 		resp := jobs.SubmitResponse{
