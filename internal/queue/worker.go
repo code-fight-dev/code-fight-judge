@@ -15,15 +15,23 @@ type Worker struct {
 	repo             *storage.JobsRepo
 	runner           *runner.Service
 	callbackClient   *callback.Client
+	metrics          Metrics
 	pollInterval     time.Duration
 	callbackAttempts int
 	callbackBackoff  time.Duration
+}
+
+type Metrics interface {
+	RecordJobStarted()
+	RecordJobFinished(status string, verdict string, language string, duration time.Duration)
+	RecordCallbackAttempt(status string)
 }
 
 func NewWorker(
 	repo *storage.JobsRepo,
 	runner *runner.Service,
 	callbackClient *callback.Client,
+	metrics Metrics,
 	pollInterval time.Duration,
 	callbackAttempts int,
 	callbackBackoff time.Duration,
@@ -39,6 +47,7 @@ func NewWorker(
 		repo:             repo,
 		runner:           runner,
 		callbackClient:   callbackClient,
+		metrics:          metrics,
 		pollInterval:     pollInterval,
 		callbackAttempts: callbackAttempts,
 		callbackBackoff:  callbackBackoff,
@@ -74,6 +83,15 @@ func (w *Worker) processOne(ctx context.Context) error {
 	log.Printf("worker picked job id=%s submission_id=%s", job.ID, job.SubmissionID)
 
 	startedAt := time.Now().UTC()
+	status := "failed"
+	verdict := "system_error"
+	if w.metrics != nil {
+		w.metrics.RecordJobStarted()
+		defer func() {
+			w.metrics.RecordJobFinished(status, verdict, job.Language, time.Since(startedAt))
+		}()
+	}
+
 	if err := w.sendResultWithRetry(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
 		JudgeSubmissionID: job.ID,
 		SubmissionID:      job.SubmissionID,
@@ -127,6 +145,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 
 		return nil
 	}
+	verdict = result.Verdict
 
 	callbackErr := w.sendResultWithRetry(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
 		JudgeSubmissionID: job.ID,
@@ -161,6 +180,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 	if err := w.repo.MarkFinished(ctx, job.ID); err != nil {
 		return fmt.Errorf("mark job finished: %w", err)
 	}
+	status = "finished"
 
 	log.Printf(
 		"worker finished job id=%s verdict=%s passed=%d/%d score=%d",
@@ -184,6 +204,9 @@ func (w *Worker) sendResultWithRetry(
 
 	for attempt := 1; attempt <= w.callbackAttempts; attempt++ {
 		if err := w.callbackClient.SendResult(ctx, callbackURL, callbackToken, payload); err != nil {
+			if w.metrics != nil {
+				w.metrics.RecordCallbackAttempt("error")
+			}
 			lastErr = err
 			log.Printf(
 				"callback attempt failed job_id=%s submission_id=%s attempt=%d/%d err=%v",
@@ -194,6 +217,9 @@ func (w *Worker) sendResultWithRetry(
 				err,
 			)
 		} else {
+			if w.metrics != nil {
+				w.metrics.RecordCallbackAttempt("success")
+			}
 			return nil
 		}
 

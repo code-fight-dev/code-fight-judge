@@ -6,17 +6,26 @@ import (
 	"strings"
 
 	"code-fight-judge/internal/config"
+	"code-fight-judge/internal/metrics"
 )
 
-func NewRouter(cfg config.Config, jobsHandler *JobsHandler, languagesHandler *LanguagesHandler, readiness ReadinessChecker) stdhttp.Handler {
+func NewRouter(cfg config.Config, jobsHandler *JobsHandler, languagesHandler *LanguagesHandler, readiness ReadinessChecker, judgeMetrics *metrics.JudgeMetrics) stdhttp.Handler {
 	mux := stdhttp.NewServeMux()
 
+	if judgeMetrics != nil {
+		mux.Handle("GET /metrics", judgeMetrics.Handler())
+	}
 	mux.HandleFunc("GET /healthz", HealthHandler())
 	mux.HandleFunc("GET /readyz", ReadyHandler(readiness))
 	mux.HandleFunc("GET /languages", requireJudgeToken(cfg.JudgeAPIToken, languagesHandler.ListSupported()))
 	mux.HandleFunc("POST /submissions", requireJudgeToken(cfg.JudgeAPIToken, jobsHandler.CreateSubmission()))
 
-	return withCommonMiddleware(cfg, mux)
+	handler := withCommonMiddleware(cfg, mux)
+	if judgeMetrics != nil {
+		handler = judgeMetrics.Middleware(handler)
+	}
+
+	return handler
 }
 
 func withCommonMiddleware(cfg config.Config, next stdhttp.Handler) stdhttp.Handler {
