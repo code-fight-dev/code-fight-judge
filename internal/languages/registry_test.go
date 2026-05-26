@@ -73,3 +73,29 @@ func TestRegistrySupportedReturnsPublicLanguageList(t *testing.T) {
 		t.Fatalf("Supported()[1].Version = %q, want %q", supported[1].Version, PythonVersion)
 	}
 }
+
+func TestRegistryIsSupported(t *testing.T) {
+	registry := NewDefaultRegistry(RuntimeImages{})
+
+	if !registry.IsSupported(" Go ", " 1.24 ") {
+		t.Fatal("IsSupported(go 1.24) = false, want true")
+	}
+	if registry.IsSupported("ruby", "3.3") {
+		t.Fatal("IsSupported(ruby 3.3) = true, want false")
+	}
+	if (*Registry)(nil).IsSupported("go", "1.24") {
+		t.Fatal("nil Registry IsSupported() = true, want false")
+	}
+}
+
+func TestNewRegistrySkipsEmptyDefinitions(t *testing.T) {
+	registry := NewRegistry([]Definition{
+		{Language: " ", Version: "1"},
+		{Language: "go", Version: " "},
+		{Language: "go", Version: "1.24"},
+	})
+
+	if len(registry.Supported()) != 1 {
+		t.Fatalf("Supported() len = %d, want 1", len(registry.Supported()))
+	}
+}
