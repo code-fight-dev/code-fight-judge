@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +18,21 @@ import (
 type fakeExecutor struct {
 	requests []sandbox.ExecuteRequest
 	results  []*sandbox.ExecuteResult
+	err      error
+	onRun    func(req sandbox.ExecuteRequest) error
 }
 
 func (e *fakeExecutor) Execute(ctx context.Context, req sandbox.ExecuteRequest) (*sandbox.ExecuteResult, error) {
 	e.requests = append(e.requests, req)
+
+	if e.onRun != nil {
+		if err := e.onRun(req); err != nil {
+			return nil, err
+		}
+	}
+	if e.err != nil {
+		return nil, e.err
+	}
 
 	if len(e.results) > 0 {
 		result := e.results[0]
@@ -329,6 +341,351 @@ func TestRunReportsInContainerRuntimeTimeout(t *testing.T) {
 	}
 }
 
+func TestRunReportsUnsupportedLanguage(t *testing.T) {
+	executor := &fakeExecutor{}
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+
+	result, err := service.Run(context.Background(), &jobs.Job{
+		ID:              "job-ruby",
+		Language:        "ruby",
+		LanguageVersion: "3.3",
+		Tests: []jobs.TestCase{
+			{ID: "case-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Verdict != "system_error" {
+		t.Fatalf("Run().Verdict = %q, want system_error", result.Verdict)
+	}
+	if result.ErrorMessage != "language and language_version are not supported" {
+		t.Fatalf("Run().ErrorMessage = %q, want unsupported language message", result.ErrorMessage)
+	}
+	if len(executor.requests) != 0 {
+		t.Fatalf("executor calls = %d, want 0", len(executor.requests))
+	}
+}
+
+func TestRunReportsNoTestsProvided(t *testing.T) {
+	executor := &fakeExecutor{}
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+
+	result, err := service.Run(context.Background(), &jobs.Job{
+		ID:              "job-python",
+		Language:        "python",
+		LanguageVersion: "3.12",
+		SourceCode:      "def solve(input_data): return input_data\n",
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Verdict != "system_error" {
+		t.Fatalf("Run().Verdict = %q, want system_error", result.Verdict)
+	}
+	if result.ErrorMessage != "no tests provided" {
+		t.Fatalf("Run().ErrorMessage = %q, want no tests provided", result.ErrorMessage)
+	}
+	if len(executor.requests) != 0 {
+		t.Fatalf("executor calls = %d, want 0", len(executor.requests))
+	}
+}
+
+func TestRunReportsCompileErrors(t *testing.T) {
+	tests := []struct {
+		name        string
+		compile     *sandbox.ExecuteResult
+		wantVerdict string
+		wantMessage string
+	}{
+		{
+			name: "oom killed",
+			compile: &sandbox.ExecuteResult{
+				ExitCode:   137,
+				OOMKilled:  true,
+				DurationMS: 7,
+			},
+			wantVerdict: "memory_limit_exceeded",
+			wantMessage: "memory limit exceeded",
+		},
+		{
+			name: "non zero exit",
+			compile: &sandbox.ExecuteResult{
+				ExitCode:   2,
+				Stderr:     "syntax error",
+				DurationMS: 8,
+			},
+			wantVerdict: "compile_error",
+			wantMessage: "compile failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &fakeExecutor{results: []*sandbox.ExecuteResult{tt.compile}}
+			service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+
+			result, err := service.Run(context.Background(), testGoJob())
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if result.Verdict != tt.wantVerdict {
+				t.Fatalf("Run().Verdict = %q, want %q", result.Verdict, tt.wantVerdict)
+			}
+			if result.ErrorMessage != tt.wantMessage {
+				t.Fatalf("Run().ErrorMessage = %q, want %q", result.ErrorMessage, tt.wantMessage)
+			}
+			if len(executor.requests) != 1 {
+				t.Fatalf("executor calls = %d, want only compile", len(executor.requests))
+			}
+		})
+	}
+}
+
+func TestRunReportsOutputDirectoryLimitExceeded(t *testing.T) {
+	executor := &fakeExecutor{
+		onRun: func(req sandbox.ExecuteRequest) error {
+			if !strings.HasSuffix(req.JobID, "-compile") {
+				return nil
+			}
+
+			outputFile := filepath.Join(req.OutputDirHost, "large-artifact.bin")
+			return os.WriteFile(outputFile, []byte(strings.Repeat("x", 2049)), 0644)
+		},
+	}
+	cfg := testRunnerConfig(t)
+	cfg.JudgeMaxOutputDirMB = 0
+	service := NewService(cfg, executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+
+	result, err := service.Run(context.Background(), testGoJob())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Verdict != "accepted" {
+		t.Fatalf("Run().Verdict with disabled output dir limit = %q, want accepted", result.Verdict)
+	}
+
+	executor = &fakeExecutor{
+		onRun: func(req sandbox.ExecuteRequest) error {
+			if !strings.HasSuffix(req.JobID, "-compile") {
+				return nil
+			}
+
+			outputFile := filepath.Join(req.OutputDirHost, "large-artifact.bin")
+			return os.WriteFile(outputFile, []byte(strings.Repeat("x", 1024*1024+1)), 0644)
+		},
+	}
+	cfg = testRunnerConfig(t)
+	cfg.JudgeMaxOutputDirMB = 1
+	service = NewService(cfg, executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+
+	result, err = service.Run(context.Background(), testGoJob())
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Verdict != "memory_limit_exceeded" {
+		t.Fatalf("Run().Verdict = %q, want memory_limit_exceeded", result.Verdict)
+	}
+	if result.ErrorMessage != "output directory limit exceeded" {
+		t.Fatalf("Run().ErrorMessage = %q, want output directory limit exceeded", result.ErrorMessage)
+	}
+}
+
+func TestRunWrapsSandboxErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		job     *jobs.Job
+		results []*sandbox.ExecuteResult
+		wantErr string
+	}{
+		{
+			name:    "compile",
+			job:     testGoJob(),
+			wantErr: "compile sandbox",
+		},
+		{
+			name: "run test",
+			job:  testPythonJob(),
+			results: []*sandbox.ExecuteResult{
+				{ExitCode: 0},
+			},
+			wantErr: "run test sandbox",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &fakeExecutor{
+				results: tt.results,
+				err:     errors.New("sandbox unavailable"),
+			}
+			service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+
+			_, err := service.Run(context.Background(), tt.job)
+			if err == nil {
+				t.Fatal("Run() error = nil, want sandbox error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Run() error = %q, want %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestRunReportsRuntimeFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		run         *sandbox.ExecuteResult
+		wantVerdict string
+		wantMessage string
+	}{
+		{
+			name: "sandbox timeout",
+			run: &sandbox.ExecuteResult{
+				ExitCode:   -1,
+				DurationMS: 1000,
+				TimedOut:   true,
+			},
+			wantVerdict: "time_limit_exceeded",
+			wantMessage: "time limit exceeded",
+		},
+		{
+			name: "oom killed",
+			run: &sandbox.ExecuteResult{
+				ExitCode:     137,
+				DurationMS:   1000,
+				OOMKilled:    true,
+				PeakMemoryKB: 65536,
+			},
+			wantVerdict: "memory_limit_exceeded",
+			wantMessage: "memory limit exceeded",
+		},
+		{
+			name: "non zero exit",
+			run: &sandbox.ExecuteResult{
+				ExitCode:   2,
+				Stderr:     "panic",
+				DurationMS: 1000,
+			},
+			wantVerdict: "runtime_error",
+			wantMessage: "program exited with non-zero exit code",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executor := &fakeExecutor{
+				results: []*sandbox.ExecuteResult{
+					tt.run,
+				},
+			}
+			service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+
+			result, err := service.Run(context.Background(), testPythonJob())
+			if err != nil {
+				t.Fatalf("Run() error = %v", err)
+			}
+
+			if result.Verdict != tt.wantVerdict {
+				t.Fatalf("Run().Verdict = %q, want %q", result.Verdict, tt.wantVerdict)
+			}
+			if result.ErrorMessage != tt.wantMessage {
+				t.Fatalf("Run().ErrorMessage = %q, want %q", result.ErrorMessage, tt.wantMessage)
+			}
+			if len(result.TestResults) != 1 || result.TestResults[0].Status != tt.wantVerdict {
+				t.Fatalf("Run().TestResults = %#v, want one %q", result.TestResults, tt.wantVerdict)
+			}
+		})
+	}
+}
+
+func TestRunContinuesAfterWrongAnswerAndScoresAcceptedTests(t *testing.T) {
+	executor := &fakeExecutor{
+		results: []*sandbox.ExecuteResult{
+			{
+				ExitCode:   0,
+				Stdout:     "wrong\n",
+				DurationMS: 10,
+			},
+			{
+				ExitCode:     0,
+				Stdout:       "second ok\r\n",
+				DurationMS:   20,
+				PeakMemoryKB: 512,
+			},
+		},
+	}
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+	job := testPythonJob()
+	job.Tests = []jobs.TestCase{
+		{
+			ID:             "case-1",
+			ExpectedOutput: "first ok",
+			Points:         40,
+		},
+		{
+			ID:             "case-2",
+			ExpectedOutput: "second ok",
+			Points:         60,
+		},
+	}
+
+	result, err := service.Run(context.Background(), job)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Verdict != "wrong_answer" {
+		t.Fatalf("Run().Verdict = %q, want wrong_answer", result.Verdict)
+	}
+	if result.PassedTests != 1 || result.Score != 60 {
+		t.Fatalf("Run() passed/score = %d/%d, want 1/60", result.PassedTests, result.Score)
+	}
+	if len(result.TestResults) != 2 {
+		t.Fatalf("Run().TestResults len = %d, want 2", len(result.TestResults))
+	}
+	if result.TestResults[0].Status != "wrong_answer" || result.TestResults[1].Status != "accepted" {
+		t.Fatalf("Run().TestResults statuses = %#v, want wrong_answer then accepted", result.TestResults)
+	}
+	if result.PeakMemoryKB != 512 {
+		t.Fatalf("Run().PeakMemoryKB = %d, want 512", result.PeakMemoryKB)
+	}
+}
+
+func TestRunSkipOutputCheckAcceptsAnyOutput(t *testing.T) {
+	executor := &fakeExecutor{
+		results: []*sandbox.ExecuteResult{
+			{
+				ExitCode:   0,
+				Stdout:     "totally different",
+				DurationMS: 10,
+			},
+		},
+	}
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+	job := testPythonJob()
+	job.Tests[0].SkipOutputCheck = true
+	job.Tests[0].Points = 25
+
+	result, err := service.Run(context.Background(), job)
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+
+	if result.Verdict != "accepted" {
+		t.Fatalf("Run().Verdict = %q, want accepted", result.Verdict)
+	}
+	if result.PassedTests != 1 || result.Score != 25 {
+		t.Fatalf("Run() passed/score = %d/%d, want 1/25", result.PassedTests, result.Score)
+	}
+	if result.TestResults[0].CheckerMessage != "output check skipped" {
+		t.Fatalf("checker message = %q, want output check skipped", result.TestResults[0].CheckerMessage)
+	}
+}
+
 func TestWriteSourceFilesWrapsPythonSolveFunction(t *testing.T) {
 	workspaceDir := t.TempDir()
 	language := languages.Definition{
@@ -523,5 +880,117 @@ func TestWriteSourceFilesKeepsGoMainProgram(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(workspaceDir, "solution.go")); !os.IsNotExist(err) {
 		t.Fatalf("solution.go exists for full Go program, err=%v", err)
+	}
+}
+
+func TestDirSizeKBAndNormalizeOutput(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte(strings.Repeat("a", 1024)), 0644); err != nil {
+		t.Fatalf("write a.txt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("b"), 0644); err != nil {
+		t.Fatalf("write b.txt: %v", err)
+	}
+
+	sizeKB, err := dirSizeKB(dir)
+	if err != nil {
+		t.Fatalf("dirSizeKB() error = %v", err)
+	}
+	if sizeKB != 2 {
+		t.Fatalf("dirSizeKB() = %d, want 2", sizeKB)
+	}
+
+	if got := normalizeOutput(" ok\r\n\n "); got != "ok" {
+		t.Fatalf("normalizeOutput() = %q, want ok", got)
+	}
+}
+
+func TestRunnerHelperBranches(t *testing.T) {
+	if got := compileMemoryMB(config.Config{}, 0); got != 256 {
+		t.Fatalf("compileMemoryMB(empty, 0) = %d, want 256", got)
+	}
+	if got := compileMemoryMB(config.Config{JudgeDefaultMemoryMB: 512}, 128); got != 512 {
+		t.Fatalf("compileMemoryMB(default 512, run 128) = %d, want 512", got)
+	}
+	if got := compileMemoryMB(config.Config{}, 128); got != 128 {
+		t.Fatalf("compileMemoryMB(empty, run 128) = %d, want 128", got)
+	}
+
+	if got := sandboxTimeout(config.Config{}, 1000); got != 0 {
+		t.Fatalf("sandboxTimeout(empty, 1000) = %s, want 0", got)
+	}
+	if got := sandboxTimeout(config.Config{JudgeMaxTimeMS: 10000}, 0); got != 10*time.Second {
+		t.Fatalf("sandboxTimeout(max 10000, run 0) = %s, want 10s", got)
+	}
+
+	if got := commandWithRuntimeTimeout([]string{"run"}, 0); !stringSlicesEqual(got, []string{"run"}) {
+		t.Fatalf("commandWithRuntimeTimeout(no timeout) = %#v, want [run]", got)
+	}
+	if got := commandWithRuntimeTimeout(nil, 1000); len(got) != 0 {
+		t.Fatalf("commandWithRuntimeTimeout(nil) = %#v, want empty", got)
+	}
+
+	if got := maxInt(3, 7); got != 7 {
+		t.Fatalf("maxInt(3, 7) = %d, want 7", got)
+	}
+}
+
+func testRunnerConfig(t *testing.T) config.Config {
+	t.Helper()
+
+	return config.Config{
+		JudgeWorkDir:         t.TempDir(),
+		JudgeRuntime:         "runsc",
+		JudgeCPUCount:        1,
+		JudgeDefaultMemoryMB: 256,
+		JudgeMaxMemoryMB:     1024,
+		JudgeMaxTimeMS:       10000,
+		JudgeDefaultPids:     64,
+		JudgeDefaultTmpfsMB:  64,
+		JudgeMaxOutputDirMB:  128,
+	}
+}
+
+func testGoJob() *jobs.Job {
+	return &jobs.Job{
+		ID:              "job-go",
+		Language:        "go",
+		LanguageVersion: "1.24",
+		SourceCode:      "package main\n\nfunc Solve(input string) string { return \"ok\" }\n",
+		Limits: jobs.Limits{
+			TimeMS:   1000,
+			MemoryMB: 128,
+			OutputKB: 64,
+		},
+		Tests: []jobs.TestCase{
+			{
+				ID:             "case-1",
+				Input:          "",
+				ExpectedOutput: "ok",
+				Points:         1,
+			},
+		},
+	}
+}
+
+func testPythonJob() *jobs.Job {
+	return &jobs.Job{
+		ID:              "job-python",
+		Language:        "python",
+		LanguageVersion: "3.12",
+		SourceCode:      "def solve(input_data): return input_data\n",
+		Limits: jobs.Limits{
+			TimeMS:   1000,
+			MemoryMB: 128,
+			OutputKB: 64,
+		},
+		Tests: []jobs.TestCase{
+			{
+				ID:             "case-1",
+				Input:          "ok",
+				ExpectedOutput: "ok",
+				Points:         1,
+			},
+		},
 	}
 }
