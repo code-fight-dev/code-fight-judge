@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	stdhttp "net/http"
@@ -10,21 +11,24 @@ import (
 	"code-fight-judge/internal/config"
 	"code-fight-judge/internal/jobs"
 	"code-fight-judge/internal/languages"
-	"code-fight-judge/internal/storage"
 )
 
 type JobsHandler struct {
-	repo      *storage.JobsRepo
+	repo      JobsCreator
 	languages *languages.Registry
 	cfg       config.Config
 	metrics   JobMetrics
+}
+
+type JobsCreator interface {
+	Create(ctx context.Context, req jobs.SubmitRequest) (*jobs.Job, error)
 }
 
 type JobMetrics interface {
 	RecordJobCreated(language string)
 }
 
-func NewJobsHandler(repo *storage.JobsRepo, languageRegistry *languages.Registry, cfg config.Config, metrics JobMetrics) *JobsHandler {
+func NewJobsHandler(repo JobsCreator, languageRegistry *languages.Registry, cfg config.Config, metrics JobMetrics) *JobsHandler {
 	return &JobsHandler{
 		repo:      repo,
 		languages: languageRegistry,
