@@ -26,8 +26,20 @@ import (
 type App struct {
 	cfg        config.Config
 	httpServer *http.Server
-	db         *pgxpool.Pool
-	worker     *queue.Worker
+	db         dbCloser
+	worker     workerRunner
+}
+
+type dbCloser interface {
+	Close()
+}
+
+type dbPinger interface {
+	Ping(ctx context.Context) error
+}
+
+type workerRunner interface {
+	Run(ctx context.Context)
 }
 
 func New() (*App, error) {
@@ -44,6 +56,10 @@ func New() (*App, error) {
 		return nil, fmt.Errorf("init postgres: %w", err)
 	}
 
+	return newApp(cfg, db), nil
+}
+
+func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	jobsRepo := storage.NewJobsRepo(db)
 	judgeMetrics := metrics.NewJudgeMetrics()
 	languageRegistry := languages.NewDefaultRegistry(languages.RuntimeImages{
@@ -53,8 +69,10 @@ func New() (*App, error) {
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg, judgeMetrics)
 	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
 	readiness := readinessChecker{
-		db:     db,
-		images: []string{cfg.JudgeGoImage, cfg.JudgePythonImage},
+		db:            db,
+		images:        []string{cfg.JudgeGoImage, cfg.JudgePythonImage},
+		checkDocker:   checkDockerVersion,
+		inspectDocker: inspectDockerImage,
 	}
 	router := apphttp.NewRouter(cfg, jobsHandler, languagesHandler, readiness, judgeMetrics)
 
@@ -86,12 +104,14 @@ func New() (*App, error) {
 		httpServer: server,
 		db:         db,
 		worker:     worker,
-	}, nil
+	}
 }
 
 type readinessChecker struct {
-	db     *pgxpool.Pool
-	images []string
+	db            dbPinger
+	images        []string
+	checkDocker   func(ctx context.Context) error
+	inspectDocker func(ctx context.Context, image string) error
 }
 
 func (c readinessChecker) CheckReady(ctx context.Context) map[string]string {
@@ -105,7 +125,7 @@ func (c readinessChecker) CheckReady(ctx context.Context) map[string]string {
 		checks["db"] = err.Error()
 	}
 
-	if err := exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Run(); err != nil {
+	if err := c.checkDocker(ctx); err != nil {
 		checks["docker"] = err.Error()
 	}
 
@@ -115,13 +135,21 @@ func (c readinessChecker) CheckReady(ctx context.Context) map[string]string {
 			checks["images"] = "empty image reference"
 			continue
 		}
-		if err := exec.CommandContext(ctx, "docker", "image", "inspect", image).Run(); err != nil {
+		if err := c.inspectDocker(ctx, image); err != nil {
 			checks["images"] = "missing " + image + ": " + err.Error()
 			break
 		}
 	}
 
 	return checks
+}
+
+func checkDockerVersion(ctx context.Context) error {
+	return exec.CommandContext(ctx, "docker", "version", "--format", "{{.Server.Version}}").Run()
+}
+
+func inspectDockerImage(ctx context.Context, image string) error {
+	return exec.CommandContext(ctx, "docker", "image", "inspect", image).Run()
 }
 
 func (a *App) Run(ctx context.Context) error {
