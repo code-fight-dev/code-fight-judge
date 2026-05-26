@@ -3,17 +3,25 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"code-fight-judge/internal/jobs"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type JobsRepo struct {
-	pool *pgxpool.Pool
+	pool jobsDB
+}
+
+type jobsDB interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 func NewJobsRepo(pool *pgxpool.Pool) *JobsRepo {
@@ -160,7 +168,7 @@ func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
 	)
 	if err != nil {
 		// no rows = no queued job
-		if err.Error() == "no rows in result set" {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("claim next queued job: %w", err)
