@@ -7,18 +7,32 @@ import (
 	"time"
 
 	"code-fight-judge/internal/callback"
+	"code-fight-judge/internal/jobs"
 	"code-fight-judge/internal/runner"
-	"code-fight-judge/internal/storage"
 )
 
 type Worker struct {
-	repo             *storage.JobsRepo
-	runner           *runner.Service
-	callbackClient   *callback.Client
+	repo             JobsStore
+	runner           Runner
+	callbackClient   CallbackClient
 	metrics          Metrics
 	pollInterval     time.Duration
 	callbackAttempts int
 	callbackBackoff  time.Duration
+}
+
+type JobsStore interface {
+	ClaimNextQueued(ctx context.Context) (*jobs.Job, error)
+	MarkFinished(ctx context.Context, jobID string) error
+	MarkFailed(ctx context.Context, jobID string) error
+}
+
+type Runner interface {
+	Run(ctx context.Context, job *jobs.Job) (*runner.RunResult, error)
+}
+
+type CallbackClient interface {
+	SendResult(ctx context.Context, callbackURL string, callbackToken string, payload callback.ResultRequest) error
 }
 
 type Metrics interface {
@@ -28,9 +42,9 @@ type Metrics interface {
 }
 
 func NewWorker(
-	repo *storage.JobsRepo,
-	runner *runner.Service,
-	callbackClient *callback.Client,
+	repo JobsStore,
+	runner Runner,
+	callbackClient CallbackClient,
 	metrics Metrics,
 	pollInterval time.Duration,
 	callbackAttempts int,
