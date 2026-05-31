@@ -2,15 +2,18 @@ name: Judge CI/CD
 
 on:
   push:
-    branches: [main]
+    branches: [master]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 concurrency:
-  group: codefight-deploy
+  group: codefight-judge-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  judge-checks-and-deploy:
+  judge-checks:
+    name: Judge checks
     runs-on: ubuntu-latest
 
     steps:
@@ -26,19 +29,32 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Go vet
+        run: go vet ./...
+
       - name: Run tests
         run: go test ./...
 
-      - name: Build judge
+      - name: Build judge binary
         run: go build -o judge ./cmd/judge
 
-      - name: Build runtime images
-        run: |
-          docker build -t judge-go:1.24 ./docker/judge-go
-          docker build -t judge-python:3.12 ./docker/judge-python
+      - name: Docker build judge
+        run: docker build -t codefight-judge-ci .
 
+      - name: Docker build Go runtime
+        run: docker build -t judge-go-ci ./docker/judge-go
+
+      - name: Docker build Python runtime
+        run: docker build -t judge-python-ci ./docker/judge-python
+
+  deploy:
+    name: Deploy judge
+    runs-on: ubuntu-latest
+    needs: judge-checks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    steps:
       - name: Deploy to VPS
-        if: success()
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VPS_HOST }}
