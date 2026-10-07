@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -106,6 +107,17 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 	}
 
 	if err := writeSourceFiles(workspaceDir, language, job.SourceCode); err != nil {
+		var submissionErr *goSubmissionError
+		if errors.As(err, &submissionErr) {
+			return &RunResult{
+				ExitCode:     -1,
+				Verdict:      "compile_error",
+				TotalTests:   len(job.Tests),
+				Stderr:       submissionErr.Error(),
+				ErrorMessage: submissionErr.Error(),
+				TestResults:  []TestResult{},
+			}, nil
+		}
 		return nil, fmt.Errorf("write source file: %w", err)
 	}
 
@@ -341,7 +353,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			testResult.CheckerMessage = "output check skipped"
 			result.PassedTests++
 			result.Score += test.Points
-		} else if normalizeOutput(runResult.Stdout) == normalizeOutput(test.ExpectedOutput) {
+		} else if outputsMatch(runResult.Stdout, test.ExpectedOutput) {
 			testResult.Status = "accepted"
 			result.PassedTests++
 			result.Score += test.Points
@@ -475,6 +487,18 @@ func writeSourceFiles(workspaceDir string, language languages.Definition, source
 			return os.WriteFile(mainFile, []byte(sourceCode), 0644)
 		}
 
+		sourceCode = ensureGoPackage(sourceCode)
+		harness, err := buildGoFunctionHarness(sourceCode)
+		if err != nil {
+			return err
+		}
+		if harness != "" {
+			if err := os.WriteFile(filepath.Join(workspaceDir, "judge_harness.go"), []byte(harness), 0644); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(workspaceDir, language.SourceFile), []byte(sourceCode), 0644)
+		}
+
 		mainFile := filepath.Join(workspaceDir, language.SourceFile)
 		return os.WriteFile(mainFile, []byte(buildGoSolveProgram(sourceCode)), 0644)
 
@@ -497,6 +521,15 @@ var goMainFunctionPattern = regexp.MustCompile(`(?m)\bfunc\s+main\s*\(`)
 var goPackageClausePattern = regexp.MustCompile(`(?m)^\s*package\s+\w+\b`)
 
 func hasGoMainFunction(sourceCode string) bool {
+	file, err := parser.ParseFile(token.NewFileSet(), "solution.go", ensureGoPackage(sourceCode), 0)
+	if err == nil {
+		for _, decl := range file.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil && fn.Name.Name == "main" {
+				return true
+			}
+		}
+		return false
+	}
 	return goMainFunctionPattern.MatchString(sourceCode)
 }
 
