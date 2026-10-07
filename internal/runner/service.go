@@ -41,9 +41,12 @@ type RunResult struct {
 	Stderr     string
 	DurationMS int64
 
-	CompileTimeMS int
-	RunTimeMS     int
-	PeakMemoryKB  int
+	CompileTimeMS          int
+	CompileTimeUnavailable bool
+	RunTimeUnavailable     bool
+	CompileLog             string
+	RunTimeMS              int
+	PeakMemoryKB           int
 
 	Verdict     string
 	PassedTests int
@@ -55,12 +58,13 @@ type RunResult struct {
 }
 
 type TestResult struct {
-	TestCaseID     string
-	Status         string
-	TimeMS         int
-	MemoryKB       int
-	ExitCode       int
-	CheckerMessage string
+	TestCaseID      string
+	Status          string
+	TimeMS          int
+	TimeUnavailable bool
+	MemoryKB        int
+	ExitCode        int
+	CheckerMessage  string
 }
 
 func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
@@ -81,6 +85,9 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		}, nil
 	}
 
+	if err := os.MkdirAll(s.cfg.JudgeWorkDir, 0700); err != nil {
+		return nil, fmt.Errorf("create work root: %w", err)
+	}
 	jobDir, err := os.MkdirTemp(s.cfg.JudgeWorkDir, "judge-job-*")
 	if err != nil {
 		return nil, fmt.Errorf("create temp job dir: %w", err)
@@ -163,6 +170,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
 			Timeout:      compileTimeout(s.cfg),
+			OutputKB:     s.cfg.JudgeMaxOutputKB,
 			Env:          restrictedRuntimeEnv(job.Language),
 		})
 		if err != nil {
@@ -170,57 +178,71 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		}
 	}
 
+	if compileResult.OutputExceeded {
+		return &RunResult{ExitCode: compileResult.ExitCode, Verdict: "output_limit_exceeded",
+			Stdout: compileResult.Stdout, Stderr: compileResult.Stderr,
+			CompileLog:             compileResult.Stdout + compileResult.Stderr,
+			CompileTimeMS:          int(compileResult.DurationMS),
+			CompileTimeUnavailable: compileResult.TimeUnavailable, DurationMS: compileResult.DurationMS,
+			TotalTests: totalTests, ErrorMessage: "compiler output limit exceeded", TestResults: []TestResult{}}, nil
+	}
 	if compileResult.TimedOut {
 		return &RunResult{
-			ExitCode:      compileResult.ExitCode,
-			Stdout:        compileResult.Stdout,
-			Stderr:        compileResult.Stderr,
-			DurationMS:    compileResult.DurationMS,
-			CompileTimeMS: int(compileResult.DurationMS),
-			RunTimeMS:     0,
-			PeakMemoryKB:  0,
-			Verdict:       "time_limit_exceeded",
-			PassedTests:   0,
-			TotalTests:    totalTests,
-			Score:         0,
-			ErrorMessage:  "compile time limit exceeded",
-			TestResults:   []TestResult{},
+			ExitCode:               compileResult.ExitCode,
+			Stdout:                 compileResult.Stdout,
+			Stderr:                 compileResult.Stderr,
+			DurationMS:             compileResult.DurationMS,
+			CompileTimeMS:          int(compileResult.DurationMS),
+			CompileTimeUnavailable: compileResult.TimeUnavailable,
+			CompileLog:             compileResult.Stdout + compileResult.Stderr,
+			RunTimeMS:              0,
+			PeakMemoryKB:           0,
+			Verdict:                "time_limit_exceeded",
+			PassedTests:            0,
+			TotalTests:             totalTests,
+			Score:                  0,
+			ErrorMessage:           "compile time limit exceeded",
+			TestResults:            []TestResult{},
 		}, nil
 	}
 
-	if compileResult.OOMKilled || compileResult.ExitCode == 137 {
+	if compileResult.OOMKilled {
 		return &RunResult{
-			ExitCode:      compileResult.ExitCode,
-			Stdout:        compileResult.Stdout,
-			Stderr:        compileResult.Stderr,
-			DurationMS:    compileResult.DurationMS,
-			CompileTimeMS: int(compileResult.DurationMS),
-			RunTimeMS:     0,
-			PeakMemoryKB:  0,
-			Verdict:       "memory_limit_exceeded",
-			PassedTests:   0,
-			TotalTests:    totalTests,
-			Score:         0,
-			ErrorMessage:  "memory limit exceeded",
-			TestResults:   []TestResult{},
+			ExitCode:               compileResult.ExitCode,
+			Stdout:                 compileResult.Stdout,
+			Stderr:                 compileResult.Stderr,
+			DurationMS:             compileResult.DurationMS,
+			CompileTimeMS:          int(compileResult.DurationMS),
+			CompileTimeUnavailable: compileResult.TimeUnavailable,
+			CompileLog:             compileResult.Stdout + compileResult.Stderr,
+			RunTimeMS:              0,
+			PeakMemoryKB:           0,
+			Verdict:                "memory_limit_exceeded",
+			PassedTests:            0,
+			TotalTests:             totalTests,
+			Score:                  0,
+			ErrorMessage:           "memory limit exceeded",
+			TestResults:            []TestResult{},
 		}, nil
 	}
 
 	if compileResult.ExitCode != 0 {
 		return &RunResult{
-			ExitCode:      compileResult.ExitCode,
-			Stdout:        compileResult.Stdout,
-			Stderr:        compileResult.Stderr,
-			DurationMS:    compileResult.DurationMS,
-			CompileTimeMS: int(compileResult.DurationMS),
-			RunTimeMS:     0,
-			PeakMemoryKB:  0,
-			Verdict:       "compile_error",
-			PassedTests:   0,
-			TotalTests:    totalTests,
-			Score:         0,
-			ErrorMessage:  "compile failed",
-			TestResults:   []TestResult{},
+			ExitCode:               compileResult.ExitCode,
+			Stdout:                 compileResult.Stdout,
+			Stderr:                 compileResult.Stderr,
+			DurationMS:             compileResult.DurationMS,
+			CompileTimeMS:          int(compileResult.DurationMS),
+			CompileTimeUnavailable: compileResult.TimeUnavailable,
+			CompileLog:             compileResult.Stdout + compileResult.Stderr,
+			RunTimeMS:              0,
+			PeakMemoryKB:           0,
+			Verdict:                "compile_error",
+			PassedTests:            0,
+			TotalTests:             totalTests,
+			Score:                  0,
+			ErrorMessage:           "compile failed",
+			TestResults:            []TestResult{},
 		}, nil
 	}
 
@@ -231,31 +253,35 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		}
 		if outputKB > s.cfg.JudgeMaxOutputDirMB*1024 {
 			return &RunResult{
-				ExitCode:      -1,
-				Stdout:        compileResult.Stdout,
-				Stderr:        compileResult.Stderr,
-				DurationMS:    compileResult.DurationMS,
-				CompileTimeMS: int(compileResult.DurationMS),
-				RunTimeMS:     0,
-				PeakMemoryKB:  0,
-				Verdict:       "memory_limit_exceeded",
-				PassedTests:   0,
-				TotalTests:    totalTests,
-				Score:         0,
-				ErrorMessage:  "output directory limit exceeded",
-				TestResults:   []TestResult{},
+				ExitCode:               -1,
+				Stdout:                 compileResult.Stdout,
+				Stderr:                 compileResult.Stderr,
+				DurationMS:             compileResult.DurationMS,
+				CompileTimeMS:          int(compileResult.DurationMS),
+				CompileTimeUnavailable: compileResult.TimeUnavailable,
+				CompileLog:             compileResult.Stdout + compileResult.Stderr,
+				RunTimeMS:              0,
+				PeakMemoryKB:           0,
+				Verdict:                "output_directory_limit_exceeded",
+				PassedTests:            0,
+				TotalTests:             totalTests,
+				Score:                  0,
+				ErrorMessage:           "output directory limit exceeded",
+				TestResults:            []TestResult{},
 			}, nil
 		}
 	}
 
 	result := &RunResult{
-		ExitCode:      0,
-		Stdout:        "",
-		Stderr:        "",
-		DurationMS:    compileResult.DurationMS,
-		CompileTimeMS: int(compileResult.DurationMS),
-		RunTimeMS:     0,
-		PeakMemoryKB:  0,
+		ExitCode:               0,
+		Stdout:                 "",
+		Stderr:                 "",
+		DurationMS:             compileResult.DurationMS,
+		CompileTimeMS:          int(compileResult.DurationMS),
+		CompileTimeUnavailable: compileResult.TimeUnavailable,
+		CompileLog:             compileResult.Stdout + compileResult.Stderr,
+		RunTimeMS:              0,
+		PeakMemoryKB:           0,
 
 		Verdict:     "accepted",
 		PassedTests: 0,
@@ -264,6 +290,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		TestResults: make([]TestResult, 0, totalTests),
 	}
 
+	memoryKnown := true
 	for _, test := range job.Tests {
 		runResult, err := s.executor.Execute(ctx, sandbox.ExecuteRequest{
 			JobID:             fmt.Sprintf("%s-test-%s", job.ID, test.ID),
@@ -271,7 +298,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			WorkDirHost:       workspaceDir,
 			OutputDirHost:     outputDir,
 			OutputDirReadOnly: true,
-			Command:           commandWithRuntimeTimeout(language.RunCommand, job.Limits.TimeMS),
+			Command:           language.RunCommand,
 			Stdin:             test.Input,
 
 			CPUCount:    s.cfg.JudgeCPUCount,
@@ -283,7 +310,8 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 
 			ReadOnlyRoot: true,
 			TmpfsSizeMB:  s.cfg.JudgeDefaultTmpfsMB,
-			Timeout:      sandboxTimeout(s.cfg, job.Limits.TimeMS),
+			Timeout:      time.Duration(job.Limits.TimeMS) * time.Millisecond,
+			OutputKB:     job.Limits.OutputKB,
 			Env:          restrictedRuntimeEnv(job.Language),
 		})
 		if err != nil {
@@ -295,16 +323,29 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		result.ExitCode = runResult.ExitCode
 		result.DurationMS += runResult.DurationMS
 		result.RunTimeMS += int(runResult.DurationMS)
+		result.RunTimeUnavailable = result.RunTimeUnavailable || runResult.TimeUnavailable
+		if runResult.PeakMemoryKB <= 0 {
+			memoryKnown = false
+		}
 		result.PeakMemoryKB = maxInt(result.PeakMemoryKB, runResult.PeakMemoryKB)
 
 		testResult := TestResult{
-			TestCaseID: test.ID,
-			TimeMS:     int(runResult.DurationMS),
-			MemoryKB:   runResult.PeakMemoryKB,
-			ExitCode:   runResult.ExitCode,
+			TestCaseID:      test.ID,
+			TimeMS:          int(runResult.DurationMS),
+			TimeUnavailable: runResult.TimeUnavailable,
+			MemoryKB:        runResult.PeakMemoryKB,
+			ExitCode:        runResult.ExitCode,
 		}
 
-		if runResult.TimedOut {
+		if runResult.OutputExceeded {
+			testResult.Status = "output_limit_exceeded"
+			testResult.CheckerMessage = "output limit exceeded"
+			result.Verdict = testResult.Status
+			result.ErrorMessage = testResult.CheckerMessage
+			result.TestResults = append(result.TestResults, testResult)
+			break
+		}
+		if runResult.TimedOut || runResult.DurationMS > int64(job.Limits.TimeMS) {
 			testResult.Status = "time_limit_exceeded"
 			testResult.CheckerMessage = "time limit exceeded"
 
@@ -315,18 +356,7 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 			break
 		}
 
-		if runResult.ExitCode == runtimeTimeoutExitCode {
-			testResult.Status = "time_limit_exceeded"
-			testResult.CheckerMessage = "time limit exceeded"
-
-			result.Verdict = "time_limit_exceeded"
-			result.ErrorMessage = "time limit exceeded"
-			result.TestResults = append(result.TestResults, testResult)
-
-			break
-		}
-
-		if runResult.OOMKilled || runResult.ExitCode == 137 {
+		if runResult.OOMKilled {
 			testResult.Status = "memory_limit_exceeded"
 			testResult.CheckerMessage = "memory limit exceeded"
 
@@ -370,6 +400,9 @@ func (s *Service) Run(ctx context.Context, job *jobs.Job) (*RunResult, error) {
 		result.TestResults = append(result.TestResults, testResult)
 	}
 
+	if !memoryKnown {
+		result.PeakMemoryKB = 0
+	}
 	return result, nil
 }
 
@@ -409,75 +442,6 @@ func compileTimeout(cfg config.Config) time.Duration {
 
 	return 0
 }
-
-func sandboxTimeout(cfg config.Config, runTimeMS int) time.Duration {
-	guard := compileTimeout(cfg)
-	if guard <= 0 {
-		return 0
-	}
-
-	runTimeout := time.Duration(runTimeMS) * time.Millisecond
-	if runTimeout <= 0 {
-		return guard
-	}
-
-	const startupGrace = 5 * time.Second
-	if guardedRunTimeout := runTimeout + startupGrace; guardedRunTimeout > guard {
-		return guardedRunTimeout
-	}
-
-	return guard
-}
-
-const runtimeTimeoutExitCode = 124
-
-func commandWithRuntimeTimeout(command []string, timeMS int) []string {
-	if timeMS <= 0 || len(command) == 0 {
-		return append([]string(nil), command...)
-	}
-
-	wrapped := []string{
-		"sh",
-		"-c",
-		runtimeTimeoutScript,
-		"judge-runtime-timeout",
-		formatTimeoutSeconds(timeMS),
-	}
-	wrapped = append(wrapped, command...)
-
-	return wrapped
-}
-
-func formatTimeoutSeconds(timeMS int) string {
-	seconds := float64(timeMS) / 1000
-	return strconv.FormatFloat(seconds, 'f', 3, 64)
-}
-
-const runtimeTimeoutScript = `timeout_seconds="$1"
-shift
-flag="/tmp/judge-runtime-timeout-$$"
-input_file="/tmp/judge-runtime-input-$$"
-cat > "$input_file"
-"$@" < "$input_file" &
-pid="$!"
-(
-	sleep "$timeout_seconds"
-	echo 1 > "$flag"
-	kill -KILL "$pid" 2>/dev/null
-) &
-killer="$!"
-wait "$pid"
-status="$?"
-kill "$killer" 2>/dev/null
-wait "$killer" 2>/dev/null
-if [ -f "$flag" ]; then
-	rm -f "$flag"
-	rm -f "$input_file"
-	exit 124
-fi
-rm -f "$input_file"
-exit "$status"
-`
 
 func writeSourceFiles(workspaceDir string, language languages.Definition, sourceCode string) error {
 	switch languages.NormalizeLanguage(language.Language) {
