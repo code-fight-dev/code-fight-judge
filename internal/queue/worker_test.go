@@ -18,6 +18,8 @@ type fakeJobsStore struct {
 	markFinishID string
 	markFailedID string
 	markErr      error
+	renewErr     error
+	renewErrors  []error
 }
 
 func (s *fakeJobsStore) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
@@ -30,14 +32,23 @@ func (s *fakeJobsStore) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) 
 	return job, nil
 }
 
-func (s *fakeJobsStore) MarkFinished(ctx context.Context, jobID string) error {
+func (s *fakeJobsStore) MarkFinished(ctx context.Context, jobID string, startedAt *time.Time) error {
 	s.markFinishID = jobID
 	return s.markErr
 }
 
-func (s *fakeJobsStore) MarkFailed(ctx context.Context, jobID string) error {
+func (s *fakeJobsStore) MarkFailed(ctx context.Context, jobID string, startedAt *time.Time) error {
 	s.markFailedID = jobID
 	return s.markErr
+}
+
+func (s *fakeJobsStore) RenewLease(ctx context.Context, jobID string, startedAt *time.Time) error {
+	if len(s.renewErrors) > 0 {
+		err := s.renewErrors[0]
+		s.renewErrors = s.renewErrors[1:]
+		return err
+	}
+	return s.renewErr
 }
 
 type fakeRunner struct {
@@ -408,7 +419,9 @@ func TestToCallbackTestsMapsRunnerResults(t *testing.T) {
 }
 
 func testJob() *jobs.Job {
+	startedAt := time.Now().UTC()
 	return &jobs.Job{
+		StartedAt:       &startedAt,
 		ID:              "job-1",
 		SubmissionID:    "submission-1",
 		TaskID:          "task-1",
@@ -429,5 +442,53 @@ func testJob() *jobs.Job {
 				Points:         100,
 			},
 		},
+	}
+}
+
+func TestWorkerDoesNotPublishResultAfterLosingLease(t *testing.T) {
+	store := &fakeJobsStore{job: testJob(), renewErrors: []error{nil, jobs.ErrLeaseLost}}
+	run := &fakeRunner{result: &runner.RunResult{Verdict: "accepted"}}
+	callbacks := &fakeCallbackClient{}
+	worker := NewWorker(store, run, callbacks, nil, time.Second, 1, time.Millisecond)
+	if err := worker.processOne(context.Background()); !errors.Is(err, jobs.ErrLeaseLost) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(callbacks.calls) != 1 || callbacks.calls[0].payload.JudgeStatus != "running" || store.markFinishID != "" || store.markFailedID != "" {
+		t.Fatalf("stale result published: %#v", callbacks.calls)
+	}
+}
+
+type untilCanceledRunner struct{}
+
+func (untilCanceledRunner) Run(ctx context.Context, job *jobs.Job) (*runner.RunResult, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestLeaseRenewalFailureCancelsRunningJob(t *testing.T) {
+	store := &fakeJobsStore{job: testJob(), renewErrors: []error{nil, jobs.ErrLeaseLost}}
+	callbacks := &fakeCallbackClient{}
+	worker := NewWorker(store, untilCanceledRunner{}, callbacks, nil, time.Second, 1, time.Millisecond)
+	worker.leaseRenewInterval = time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := worker.processOne(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("error=%v", err)
+	}
+	if len(callbacks.calls) != 1 || store.markFailedID != "" || store.markFinishID != "" {
+		t.Fatal("canceled claim was completed or published")
+	}
+}
+
+func TestUnavailableTimeIsNotReportedAsZero(t *testing.T) {
+	if measuredTime(0, true) != nil {
+		t.Fatal("unknown time reported as zero")
+	}
+	if known := measuredTime(0, false); known == nil || *known != 0 {
+		t.Fatal("measured zero lost")
+	}
+	results := toCallbackTests([]runner.TestResult{{TimeUnavailable: true}})
+	if results[0].TimeMs != nil {
+		t.Fatal("unknown per-test time reported as zero")
 	}
 }

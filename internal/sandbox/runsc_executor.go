@@ -1,9 +1,10 @@
 package sandbox
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,15 +16,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"code-fight-judge/internal/supervisor"
 )
 
 type RunscExecutor struct {
-	dockerBin string
+	dockerBin   string
+	cgroupRoots []string
+	procRoots   []string
 }
 
-func NewRunscExecutor() *RunscExecutor {
-	return &RunscExecutor{dockerBin: "docker"}
-}
+func NewRunscExecutor() *RunscExecutor { return &RunscExecutor{dockerBin: "docker"} }
 
 func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error) {
 	if req.Image == "" {
@@ -38,603 +41,377 @@ func (e *RunscExecutor) Execute(ctx context.Context, req ExecuteRequest) (*Execu
 	if len(req.Command) == 0 {
 		return nil, fmt.Errorf("sandbox execute: command is required")
 	}
-
+	if req.Timeout <= 0 || req.OutputKB <= 0 || req.OutputKB > 1024*1024 {
+		return nil, fmt.Errorf("sandbox execute: positive timeout and output limit (at most 1 GiB) are required")
+	}
+	if req.MemoryMB < 6 || req.CPUCount <= 0 || req.PidsLimit <= 0 {
+		return nil, fmt.Errorf("sandbox execute: memory >= 6 MiB and positive CPU/PID limits are required")
+	}
+	// A regular read-only input file guarantees EOF without Docker attach's
+	// OpenStdin/StdinOnce lifecycle and keeps input setup outside task timing.
+	input, err := os.CreateTemp(filepath.Dir(req.WorkDirHost), "judge-stdin-*")
+	if err != nil {
+		return nil, fmt.Errorf("create task input: %w", err)
+	}
+	defer os.Remove(input.Name())
+	if _, err := input.WriteString(req.Stdin); err != nil {
+		input.Close()
+		return nil, err
+	}
+	if err := input.Chmod(0444); err != nil {
+		input.Close()
+		return nil, err
+	}
+	if err := input.Close(); err != nil {
+		return nil, err
+	}
 	runtimeName := req.RuntimeName
 	if runtimeName == "" {
 		runtimeName = "runsc"
 	}
-
-	containerName := buildContainerName(req.JobID)
-
-	createArgs := []string{
-		"create",
-		"--runtime=" + runtimeName,
-		"--name", containerName,
-		"--security-opt", "no-new-privileges",
-		"--cap-drop", "ALL",
-		"--ipc", "none",
-		"--user", "10001:10001",
-		"--ulimit", "nofile=256:256",
-		"--ulimit", "fsize=134217728:134217728",
-		"--ulimit", "nproc=128:128",
+	name := buildContainerName(req.JobID)
+	args := []string{
+		"create", "--runtime=" + runtimeName, "--name", name,
+		"--security-opt", "no-new-privileges", "--cap-drop", "ALL",
+		// These capabilities belong only to root PID 1. Changing UID to 10001 clears
+		// them in the task; no-new-privileges prevents regaining them via exec.
+		"--cap-add", "SETUID", "--cap-add", "SETGID", "--cap-add", "KILL",
+		"--user", "0:0", "--ipc", "none", "--log-driver", "none",
+		"--entrypoint", "/usr/local/bin/judge-supervisor",
+		"--ulimit", "nofile=256:256", "--ulimit", "fsize=134217728:134217728", "--ulimit", "nproc=128:128",
+		"--cpus", strconv.FormatFloat(req.CPUCount, 'f', -1, 64),
+		"--memory", fmt.Sprintf("%dm", req.MemoryMB),
+		"--memory-swap", fmt.Sprintf("%dm", req.MemoryMB),
+		"--pids-limit", strconv.Itoa(req.PidsLimit),
 	}
-
-	if req.Stdin != "" {
-		createArgs = append(createArgs, "-i")
-	}
-
 	if req.NetworkNone {
-		createArgs = append(createArgs, "--network", "none")
+		args = append(args, "--network", "none")
 	}
-
-	if req.CPUCount > 0 {
-		createArgs = append(createArgs, "--cpus", strconv.FormatFloat(req.CPUCount, 'f', -1, 64))
-	}
-
-	if req.MemoryMB > 0 {
-		createArgs = append(createArgs, "--memory", fmt.Sprintf("%dm", req.MemoryMB))
-	}
-
-	if req.PidsLimit > 0 {
-		createArgs = append(createArgs, "--pids-limit", strconv.Itoa(req.PidsLimit))
-	}
-
 	if req.ReadOnlyRoot {
-		createArgs = append(createArgs, "--read-only")
+		args = append(args, "--read-only")
 	}
-
-	tmpfsSizeMB := req.TmpfsSizeMB
-	if tmpfsSizeMB <= 0 {
-		tmpfsSizeMB = 256
+	tmpfsMB := req.TmpfsSizeMB
+	if tmpfsMB <= 0 {
+		tmpfsMB = 64
 	}
-
-	createArgs = append(createArgs,
-		"--tmpfs", fmt.Sprintf("/tmp:exec,size=%dm", tmpfsSizeMB),
-		"--tmpfs", "/gocache:exec,size=256m",
-		"-e", "TMPDIR=/tmp",
-		"-e", "GOTMPDIR=/tmp",
-		"-e", "GOCACHE=/gocache",
-	)
-
 	outputMode := "rw"
 	if req.OutputDirReadOnly {
 		outputMode = "ro"
 	}
-
-	createArgs = append(createArgs,
-		"-v", fmt.Sprintf("%s:/workspace:ro", filepath.Clean(req.WorkDirHost)),
-		"-v", fmt.Sprintf("%s:/output:%s", filepath.Clean(req.OutputDirHost), outputMode),
-		"-w", "/workspace",
+	args = append(args,
+		"--tmpfs", fmt.Sprintf("/tmp:exec,size=%dm", tmpfsMB), "--tmpfs", "/gocache:exec,size=256m",
+		"-e", "TMPDIR=/tmp", "-e", "GOTMPDIR=/tmp", "-e", "GOCACHE=/gocache",
+		"-v", filepath.Clean(req.WorkDirHost)+":/workspace:ro",
+		"-v", filepath.Clean(req.OutputDirHost)+":/output:"+outputMode,
+		"-v", input.Name()+":/judge-stdin:ro",
+		"--tmpfs", fmt.Sprintf("/judge-report:noexec,nosuid,nodev,mode=0700,uid=0,gid=0,size=%dk", req.OutputKB*2+64), "-w", "/workspace",
 	)
-
 	for k, v := range req.Env {
-		createArgs = append(createArgs, "-e", fmt.Sprintf("%s=%s", k, v))
+		args = append(args, "-e", k+"="+v)
 	}
+	args = append(args, req.Image, "-timeout", req.Timeout.String(), "-output-bytes", strconv.Itoa(req.OutputKB*1024), "--")
+	args = append(args, req.Command...)
 
-	createArgs = append(createArgs, req.Image)
-	createArgs = append(createArgs, req.Command...)
-
-	containerID, err := e.createContainer(ctx, createArgs)
+	// This bounds infrastructure work, including create/start/report collection.
+	// The task's own timer and measurements are controlled by trusted PID 1.
+	runCtx, cancel := context.WithTimeout(ctx, req.Timeout+10*time.Second)
+	defer cancel()
+	id, err := e.createContainer(runCtx, args)
 	if err != nil {
+		_ = e.forceRemoveContainer(name) // create may have succeeded before CLI cancellation
 		return nil, err
 	}
-	log.Printf("sandbox execute: container created name=%s id=%s timeout=%s", containerName, containerID, req.Timeout)
-	defer e.forceRemoveContainer(containerName)
-
-	var runCtx context.Context
-	var cancel context.CancelFunc
-	if req.Timeout > 0 {
-		runCtx, cancel = context.WithTimeout(ctx, req.Timeout)
-	} else {
-		runCtx, cancel = context.WithCancel(ctx)
-	}
-
-	forceDone := make(chan struct{})
-	stopForce := make(chan struct{})
-	go func() {
-		defer close(forceDone)
-
-		select {
-		case <-runCtx.Done():
-			_ = e.forceKillContainer(containerName)
-		case <-stopForce:
-		}
-	}()
 	defer func() {
-		if runCtx.Err() == nil {
-			close(stopForce)
+		if err := e.forceRemoveContainer(id); err != nil {
+			log.Printf("sandbox cleanup failed container_id=%s err=%v", id, err)
 		}
-		cancel()
-		<-forceDone
 	}()
+	log.Printf("sandbox execute: container created name=%s id=%s timeout=%s", name, id, req.Timeout)
 
-	monitor := e.startStatsMonitor(runCtx, containerID)
-	started := time.Now()
-
-	if err := e.startContainer(runCtx, containerID, req.Stdin); err != nil {
-		duration := time.Since(started).Milliseconds()
-		if runCtx.Err() != nil {
-			<-forceDone
-		}
-		stdout, stderr := e.readContainerLogs(context.Background(), containerID)
-		peakMemoryKB := e.maxObservedMemoryKB(containerID, monitor.Stop())
-		oomKilled := e.inspectOOMKilled(containerID, -1)
-		log.Printf(
-			"sandbox execute: container finished after start error name=%s id=%s duration_ms=%d peak_memory_kb=%d oom_killed=%t err=%v ctx_err=%v",
-			containerName,
-			containerID,
-			duration,
-			peakMemoryKB,
-			oomKilled,
-			err,
-			runCtx.Err(),
-		)
-
-		if runCtx.Err() != nil {
-			return &ExecuteResult{
-				ExitCode:     -1,
-				Stdout:       stdout,
-				Stderr:       stderr,
-				DurationMS:   duration,
-				PeakMemoryKB: peakMemoryKB,
-				TimedOut:     errors.Is(runCtx.Err(), context.DeadlineExceeded),
-				OOMKilled:    oomKilled,
-			}, nil
-		}
-
+	if err := e.startContainer(runCtx, id); err != nil {
 		return nil, err
 	}
-
-	exitCode, err := e.waitContainer(runCtx, containerID)
-	duration := time.Since(started).Milliseconds()
-	if err != nil && runCtx.Err() != nil {
-		<-forceDone
+	waitDone := make(chan containerWait, 1)
+	go func() { code, err := e.waitContainer(runCtx, id); waitDone <- containerWait{code, err} }()
+	defer func() {
+		cancel()
+		if waitDone != nil {
+			<-waitDone
+		}
+	}()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		report, err := e.readSupervisorReport(runCtx, id, req.OutputKB*1024)
+		if err == nil {
+			if report.Error != "" {
+				return nil, fmt.Errorf("sandbox supervisor: %s", report.Error)
+			}
+			peak, peakErr := e.readCgroupPeakMemoryKB(id)
+			if peakErr != nil {
+				log.Printf("sandbox memory: peak unavailable container_id=%s err=%v", id, peakErr)
+			}
+			oom, err := e.inspectOOMKilled(id)
+			if err != nil {
+				return nil, err
+			}
+			return &ExecuteResult{ExitCode: report.ExitCode, Stdout: string(report.Stdout), Stderr: string(report.Stderr),
+				DurationMS: report.DurationMS, PeakMemoryKB: peak, TimedOut: report.TimedOut,
+				OutputExceeded: report.OutputExceeded, OOMKilled: oom}, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-runCtx.Done():
+			return nil, fmt.Errorf("sandbox infrastructure deadline exceeded before trusted report: %w", runCtx.Err())
+		case wait := <-waitDone:
+			waitDone = nil
+			if wait.err != nil {
+				return nil, wait.err
+			}
+			// A successful supervisor stays alive after publishing its report. An exit
+			// without a report is an infrastructure failure, unless Docker confirms OOM.
+			oom, err := e.inspectOOMKilled(id)
+			if err != nil {
+				return nil, err
+			}
+			if !oom {
+				return nil, fmt.Errorf("sandbox supervisor exited without report (exit %d)", wait.exitCode)
+			}
+			return &ExecuteResult{ExitCode: wait.exitCode, OOMKilled: true, TimeUnavailable: true}, nil
+		case <-ticker.C:
+		}
 	}
-	stdout, stderr := e.readContainerLogs(context.Background(), containerID)
-	peakMemoryKB := e.maxObservedMemoryKB(containerID, monitor.Stop())
-	oomKilled := e.inspectOOMKilled(containerID, exitCode)
-	log.Printf(
-		"sandbox execute: container finished name=%s id=%s exit_code=%d duration_ms=%d peak_memory_kb=%d oom_killed=%t wait_err=%v ctx_err=%v",
-		containerName,
-		containerID,
-		exitCode,
-		duration,
-		peakMemoryKB,
-		oomKilled,
-		err,
-		runCtx.Err(),
-	)
+}
 
+type containerWait struct {
+	exitCode int
+	err      error
+}
+
+func (e *RunscExecutor) readSupervisorReport(ctx context.Context, id string, outputLimit int) (*supervisor.Result, error) {
+	// The result is root-owned in a private tmpfs inside the sandbox. Reading via
+	// a root docker exec avoids trusting host bind-mount UID mappings or allowing
+	// the submission to tamper with a report owned by the judge's host UID.
+	maxBytes := outputLimit*2 + 4096
+	stdout, _, err := e.dockerCommandWithLimit(ctx, "", maxBytes+1, "exec", "--user", "0:0", id, "/bin/cat", "/judge-report/"+supervisor.ResultFile)
 	if err != nil {
-		if runCtx.Err() != nil {
-			return &ExecuteResult{
-				ExitCode:     -1,
-				Stdout:       stdout,
-				Stderr:       stderr,
-				DurationMS:   duration,
-				PeakMemoryKB: peakMemoryKB,
-				TimedOut:     errors.Is(runCtx.Err(), context.DeadlineExceeded),
-				OOMKilled:    oomKilled,
-			}, nil
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
+		return nil, os.ErrNotExist // missing report / container not started yet
+	}
+	return decodeSupervisorReport(strings.NewReader(stdout), outputLimit)
+}
 
+func decodeSupervisorReport(reader io.Reader, outputLimit int) (*supervisor.Result, error) {
+	// Output uses base64, and report fields have a separate bounded allowance.
+	maxBytes := int64(outputLimit)*2 + 4096
+	data, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
 		return nil, err
 	}
-
-	return &ExecuteResult{
-		ExitCode:     exitCode,
-		Stdout:       stdout,
-		Stderr:       stderr,
-		DurationMS:   duration,
-		PeakMemoryKB: peakMemoryKB,
-		OOMKilled:    oomKilled,
-	}, nil
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("supervisor report exceeds maximum")
+	}
+	var result supervisor.Result
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("decode supervisor report: %w", err)
+	}
+	if result.Version != supervisor.ProtocolVersion || len(result.Stdout)+len(result.Stderr) > outputLimit || result.DurationMS < 0 {
+		return nil, fmt.Errorf("invalid supervisor report")
+	}
+	return &result, nil
 }
 
-func (e *RunscExecutor) createContainer(ctx context.Context, args []string) (string, error) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	cmd := exec.CommandContext(ctx, e.dockerBin, args...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf(
-			"sandbox execute: docker create failed: %w; args=%v; stderr=%s",
-			err,
-			args,
-			stderr.String(),
-		)
-	}
-
-	containerID := strings.TrimSpace(stdout.String())
-	if containerID == "" {
-		return "", fmt.Errorf("sandbox execute: docker create returned empty container id")
-	}
-
-	return containerID, nil
+// Docker diagnostics are capped independently from task output.
+type limitedBuffer struct {
+	mu    sync.Mutex
+	data  bytes.Buffer
+	limit int
 }
 
-func (e *RunscExecutor) startContainer(ctx context.Context, containerID string, stdin string) error {
-	args := []string{"start"}
-
-	if stdin != "" {
-		args = append(args, "--attach", "--interactive")
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if remaining := b.limit - b.data.Len(); remaining > 0 {
+		b.data.Write(p[:min(len(p), remaining)])
 	}
-
-	args = append(args, containerID)
-
-	var stderr bytes.Buffer
+	return len(p), nil
+}
+func (b *limitedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.data.String() }
+func (e *RunscExecutor) dockerCommand(ctx context.Context, stdin string, args ...string) (string, string, error) {
+	return e.dockerCommandWithLimit(ctx, stdin, 16384, args...)
+}
+func (e *RunscExecutor) dockerCommandWithLimit(ctx context.Context, stdin string, limit int, args ...string) (string, string, error) {
+	stdout, stderr := &limitedBuffer{limit: limit}, &limitedBuffer{limit: 16384}
 	cmd := exec.CommandContext(ctx, e.dockerBin, args...)
-	cmd.Stderr = &stderr
-
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.WaitDelay = time.Second
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
-
-	if err := cmd.Run(); err != nil {
-		if isExitError(err) {
-			return nil
-		}
-
-		return fmt.Errorf(
-			"sandbox execute: docker start failed: %w; args=%v; stderr=%s",
-			err,
-			args,
-			stderr.String(),
-		)
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
+func (e *RunscExecutor) createContainer(ctx context.Context, args []string) (string, error) {
+	stdout, stderr, err := e.dockerCommand(ctx, "", args...)
+	if err != nil {
+		return "", fmt.Errorf("sandbox execute: docker create failed: %w; stderr=%s", err, stderr)
 	}
-
+	id := strings.TrimSpace(stdout)
+	if id == "" {
+		return "", fmt.Errorf("sandbox execute: docker create returned empty container id")
+	}
+	return id, nil
+}
+func (e *RunscExecutor) startContainer(ctx context.Context, id string) error {
+	_, stderr, err := e.dockerCommand(ctx, "", "start", id)
+	if err != nil {
+		return fmt.Errorf("sandbox execute: docker start failed: %w; stderr=%s", err, stderr)
+	}
 	return nil
 }
 
-func (e *RunscExecutor) waitContainer(ctx context.Context, containerID string) (int, error) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	args := []string{"wait", containerID}
-	cmd := exec.CommandContext(ctx, e.dockerBin, args...)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		return -1, fmt.Errorf(
-			"sandbox execute: docker wait failed: %w; args=%v; stderr=%s",
-			err,
-			args,
-			stderr.String(),
-		)
+func (e *RunscExecutor) waitContainer(ctx context.Context, id string) (int, error) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		stdout, stderr, err := e.dockerCommand(ctx, "", "inspect", "--format", "{{json .State}}", id)
+		if err != nil {
+			return -1, fmt.Errorf("inspect sandbox state: %w; stderr=%s", err, stderr)
+		}
+		var state struct {
+			Status   string
+			ExitCode int
+		}
+		if err := json.Unmarshal([]byte(stdout), &state); err != nil {
+			return -1, fmt.Errorf("decode sandbox state: %w", err)
+		}
+		if state.Status == "exited" || state.Status == "dead" {
+			return state.ExitCode, nil
+		}
+		if state.Status != "created" && state.Status != "running" {
+			return -1, fmt.Errorf("unexpected sandbox state %q", state.Status)
+		}
+		select {
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		case <-ticker.C:
+		}
 	}
-
-	exitCodeText := strings.TrimSpace(stdout.String())
-	exitCode, err := strconv.Atoi(exitCodeText)
-	if err != nil {
-		return -1, fmt.Errorf("sandbox execute: parse docker wait exit code %q: %w", exitCodeText, err)
-	}
-
-	return exitCode, nil
 }
-
-func (e *RunscExecutor) readContainerLogs(ctx context.Context, containerID string) (string, string) {
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	cmd := exec.CommandContext(ctx, e.dockerBin, "logs", containerID)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	_ = cmd.Run()
-
-	return stdout.String(), stderr.String()
-}
-
-func (e *RunscExecutor) inspectOOMKilled(containerID string, exitCode int) bool {
+func (e *RunscExecutor) inspectOOMKilled(id string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-
-	cmd := exec.CommandContext(
-		ctx,
-		e.dockerBin,
-		"inspect",
-		"--format", "{{.State.OOMKilled}}",
-		containerID,
-	)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		if exitCode == 137 {
-			log.Printf("sandbox execute: docker inspect oom failed, using exit code fallback container_id=%s err=%v stderr=%s", containerID, err, stderr.String())
-			return true
-		}
-
-		return false
-	}
-
-	oomKilled := strings.TrimSpace(stdout.String()) == "true"
-	if oomKilled || exitCode == 137 {
-		return true
-	}
-
-	return false
-}
-
-type statsMonitor struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	mu     sync.Mutex
-	peakKB int
-	cmd    *exec.Cmd
-}
-
-func (e *RunscExecutor) startStatsMonitor(ctx context.Context, containerID string) *statsMonitor {
-	monitorCtx, cancel := context.WithCancel(ctx)
-	monitor := &statsMonitor{
-		cancel: cancel,
-		done:   make(chan struct{}),
-	}
-
-	go func() {
-		defer close(monitor.done)
-		defer func() {
-			monitor.mu.Lock()
-			peakKB := monitor.peakKB
-			monitor.mu.Unlock()
-			log.Printf("sandbox stats: monitor stopped container_id=%s peak_memory_kb=%d", containerID, peakKB)
-		}()
-
-		ticker := time.NewTicker(100 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			sampled := monitor.stream(e, monitorCtx, containerID)
-
-			select {
-			case <-monitorCtx.Done():
-				return
-			case <-ticker.C:
-			}
-
-			if !sampled {
-				continue
-			}
-		}
-	}()
-
-	return monitor
-}
-
-func (m *statsMonitor) Stop() int {
-	m.cancel()
-	m.kill()
-	<-m.done
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	return m.peakKB
-}
-
-func (m *statsMonitor) stream(e *RunscExecutor, ctx context.Context, containerID string) bool {
-	cmd := exec.CommandContext(
-		ctx,
-		e.dockerBin,
-		"stats",
-		"--format", "{{.MemUsage}}",
-		containerID,
-	)
-
-	stdout, err := cmd.StdoutPipe()
+	stdout, stderr, err := e.dockerCommand(ctx, "", "inspect", "--format", "{{.State.OOMKilled}}", id)
 	if err != nil {
-		log.Printf("sandbox stats: stdout pipe error container_id=%s err=%v", containerID, err)
-		return false
+		return false, fmt.Errorf("inspect sandbox OOM state: %w; stderr=%s", err, stderr)
 	}
-
-	if err := cmd.Start(); err != nil {
-		log.Printf("sandbox stats: start error container_id=%s err=%v", containerID, err)
-		return false
+	value := strings.TrimSpace(stdout)
+	if value != "true" && value != "false" {
+		return false, fmt.Errorf("invalid sandbox OOM state %q", value)
 	}
-
-	m.setCmd(cmd)
-
-	samples := m.readStats(stdout)
-	_ = cmd.Wait()
-	m.setCmd(nil)
-
-	return samples > 0
+	return value == "true", nil
 }
 
-func (m *statsMonitor) setCmd(cmd *exec.Cmd) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	m.cmd = cmd
-}
-
-func (m *statsMonitor) kill() {
-	m.mu.Lock()
-	cmd := m.cmd
-	m.mu.Unlock()
-
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
-}
-
-func (m *statsMonitor) readStats(r io.Reader) int {
-	scanner := bufio.NewScanner(r)
-	samples := 0
-
-	for scanner.Scan() {
-		memoryKB, err := parseDockerMemoryUsageKB(scanner.Text())
-		if err != nil {
-			log.Printf("sandbox stats: parse memory usage error raw=%q err=%v", scanner.Text(), err)
-			continue
-		}
-		if memoryKB <= 0 {
-			continue
-		}
-
-		samples++
-
-		m.mu.Lock()
-		if memoryKB > m.peakKB {
-			m.peakKB = memoryKB
-		}
-		m.mu.Unlock()
-	}
-
-	return samples
-}
-
-func (e *RunscExecutor) maxObservedMemoryKB(containerID string, statsPeakKB int) int {
-	cgroupPeakKB, err := e.readCgroupPeakMemoryKB(containerID)
-	if err != nil {
-		if statsPeakKB == 0 {
-			log.Printf("sandbox memory: cgroup fallback unavailable container_id=%s stats_peak_kb=%d err=%v", containerID, statsPeakKB, err)
-		}
-		return statsPeakKB
-	}
-	if statsPeakKB == 0 || cgroupPeakKB > statsPeakKB {
-		log.Printf("sandbox memory: cgroup fallback container_id=%s stats_peak_kb=%d cgroup_peak_kb=%d", containerID, statsPeakKB, cgroupPeakKB)
-	}
-
-	if cgroupPeakKB > statsPeakKB {
-		return cgroupPeakKB
-	}
-
-	return statsPeakKB
-}
-
-func (e *RunscExecutor) readCgroupPeakMemoryKB(containerID string) (int, error) {
-	fullID := strings.TrimSpace(containerID)
-	if fullID == "" {
+func (e *RunscExecutor) readCgroupPeakMemoryKB(id string) (int, error) {
+	if strings.TrimSpace(id) == "" {
 		return 0, fmt.Errorf("empty container id")
 	}
-
-	roots := []string{"/host/sys/fs/cgroup", "/sys/fs/cgroup"}
-	files := []string{
-		filepath.Join("system.slice", "docker-"+fullID+".scope", "memory.peak"),
-		filepath.Join("docker", fullID, "memory.peak"),
-		filepath.Join("memory", "system.slice", "docker-"+fullID+".scope", "memory.max_usage_in_bytes"),
-		filepath.Join("memory", "docker", fullID, "memory.max_usage_in_bytes"),
-		filepath.Join("system.slice", "docker-"+fullID+".scope", "memory.current"),
-		filepath.Join("docker", fullID, "memory.current"),
+	roots := e.cgroupRoots
+	if len(roots) == 0 {
+		roots = []string{"/host/sys/fs/cgroup", "/sys/fs/cgroup"}
 	}
-
+	files := []string{
+		filepath.Join("system.slice", "docker-"+id+".scope", "memory.peak"),
+		filepath.Join("docker", id, "memory.peak"),
+		filepath.Join("memory", "system.slice", "docker-"+id+".scope", "memory.max_usage_in_bytes"),
+		filepath.Join("memory", "docker", id, "memory.max_usage_in_bytes"),
+	}
+	// Resolve non-default cgroup parents from the actual host process, when proc
+	// is available. Fall back to standard Docker paths, never to current usage.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	pid, _, err := e.dockerCommand(ctx, "", "inspect", "--format", "{{.State.Pid}}", id)
+	if err == nil {
+		procRoots := e.procRoots
+		if len(procRoots) == 0 {
+			procRoots = []string{"/host/proc", "/proc"}
+		}
+		for _, procRoot := range procRoots {
+			raw, err := os.ReadFile(filepath.Join(procRoot, strings.TrimSpace(pid), "cgroup"))
+			if err != nil {
+				continue
+			}
+			files = append(cgroupPeakFiles(string(raw), id), files...)
+		}
+	}
 	for _, root := range roots {
 		for _, file := range files {
-			value, err := readMemoryFileKB(filepath.Join(root, file))
-			if err == nil && value > 0 {
-				return value, nil
+			if kb, err := readMemoryFileKB(filepath.Join(root, file)); err == nil {
+				return kb, nil
 			}
 		}
 	}
-
-	return 0, fmt.Errorf("container cgroup memory file not found")
+	return 0, fmt.Errorf("container cgroup peak file not found; mount host cgroup read-only")
 }
-
+func cgroupPeakFiles(raw, id string) []string {
+	var files []string
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		parts := strings.SplitN(line, ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		path := strings.TrimPrefix(filepath.Clean("/"+parts[2]), "/")
+		// Host PIDs can coincide with unrelated PIDs inside the judge's namespace.
+		// Accept only a cgroup containing this container's ID, and read the container
+		// root rather than an individual Sentry/Gofer descendant's peak.
+		components := strings.Split(path, "/")
+		matched := false
+		for i, component := range components {
+			if component == id || component == "docker-"+id+".scope" {
+				path = strings.Join(components[:i+1], "/")
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		if parts[0] == "0" && parts[1] == "" {
+			files = append(files, filepath.Join(path, "memory.peak"))
+		}
+		for _, controller := range strings.Split(parts[1], ",") {
+			if controller == "memory" {
+				files = append(files, filepath.Join("memory", path, "memory.max_usage_in_bytes"))
+			}
+		}
+	}
+	return files
+}
 func readMemoryFileKB(path string) (int, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return 0, err
 	}
-
-	value := strings.TrimSpace(string(raw))
-	if value == "" || value == "max" {
-		return 0, fmt.Errorf("invalid memory value %q", value)
-	}
-
-	bytesValue, err := strconv.ParseInt(value, 10, 64)
+	value, err := strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64)
 	if err != nil {
 		return 0, err
 	}
-
-	return int((bytesValue + 1023) / 1024), nil
+	if value < 0 {
+		return 0, fmt.Errorf("negative cgroup memory value")
+	}
+	return int(value/1024 + boolInt(value%1024 != 0)), nil
 }
-
-func parseDockerMemoryUsageKB(value string) (int, error) {
-	used := strings.TrimSpace(stripANSIEscapeSequences(value))
-	if idx := strings.Index(used, "/"); idx >= 0 {
-		used = strings.TrimSpace(used[:idx])
+func boolInt(v bool) int64 {
+	if v {
+		return 1
 	}
-
-	if used == "" {
-		return 0, fmt.Errorf("empty docker memory usage")
-	}
-
-	return parseDockerBytesToKB(used)
-}
-
-func stripANSIEscapeSequences(value string) string {
-	var b strings.Builder
-
-	for i := 0; i < len(value); i++ {
-		if value[i] == 0x1b && i+1 < len(value) && value[i+1] == '[' {
-			i += 2
-			for i < len(value) {
-				ch := value[i]
-				if ch >= '@' && ch <= '~' {
-					break
-				}
-				i++
-			}
-			continue
-		}
-
-		if value[i] < 0x20 && value[i] != '\t' && value[i] != '\n' && value[i] != '\r' {
-			continue
-		}
-
-		b.WriteByte(value[i])
-	}
-
-	return b.String()
-}
-
-func parseDockerBytesToKB(value string) (int, error) {
-	value = strings.TrimSpace(value)
-
-	unitStart := len(value)
-	for i, r := range value {
-		if (r < '0' || r > '9') && r != '.' {
-			unitStart = i
-			break
-		}
-	}
-
-	numberText := strings.TrimSpace(value[:unitStart])
-	unit := strings.ToLower(strings.TrimSpace(value[unitStart:]))
-
-	number, err := strconv.ParseFloat(numberText, 64)
-	if err != nil {
-		return 0, err
-	}
-
-	multiplier := float64(1)
-	switch unit {
-	case "b", "":
-		multiplier = 1
-	case "kb", "kib":
-		multiplier = 1024
-	case "mb", "mib":
-		multiplier = 1024 * 1024
-	case "gb", "gib":
-		multiplier = 1024 * 1024 * 1024
-	default:
-		return 0, fmt.Errorf("unknown docker memory unit %q", unit)
-	}
-
-	return int((number*multiplier + 1023) / 1024), nil
-}
-
-func isExitError(err error) bool {
-	var exitErr *exec.ExitError
-	return errors.As(err, &exitErr)
+	return 0
 }
 
 func buildContainerName(jobID string) string {
@@ -650,7 +427,7 @@ func buildContainerName(jobID string) string {
 		suffix = suffix[:24]
 	}
 
-	return "judge-" + suffix
+	return "judge-" + suffix + "-" + rand.Text()[:10]
 }
 
 func sanitizeContainerNameSuffix(value string) string {

@@ -309,7 +309,7 @@ func TestValidateSubmitRequestRejectsInvalidRequests(t *testing.T) {
 			mutate: func(req *jobs.SubmitRequest) {
 				req.Limits.MemoryMB = 0
 			},
-			wantErr: "limits.memory_mb must be > 0",
+			wantErr: "limits.memory_mb must be >= 6",
 		},
 		{
 			name: "memory max",
@@ -493,6 +493,7 @@ func testConfig() config.Config {
 		JudgeMaxTests:      128,
 		JudgeMaxTestBytes:  1 << 20,
 		JudgeCallbackToken: "default-callback-token",
+		JudgeCallbackURL:   "https://backend.example.test/callback",
 	}
 }
 
