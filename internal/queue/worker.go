@@ -8,23 +8,26 @@ import (
 
 	"code-fight-judge/internal/callback"
 	"code-fight-judge/internal/jobs"
+	"code-fight-judge/internal/languages"
 	"code-fight-judge/internal/runner"
 )
 
 type Worker struct {
-	repo             JobsStore
-	runner           Runner
-	callbackClient   CallbackClient
-	metrics          Metrics
-	pollInterval     time.Duration
-	callbackAttempts int
-	callbackBackoff  time.Duration
+	repo               JobsStore
+	runner             Runner
+	callbackClient     CallbackClient
+	metrics            Metrics
+	pollInterval       time.Duration
+	callbackAttempts   int
+	callbackBackoff    time.Duration
+	leaseRenewInterval time.Duration
 }
 
 type JobsStore interface {
 	ClaimNextQueued(ctx context.Context) (*jobs.Job, error)
-	MarkFinished(ctx context.Context, jobID string) error
-	MarkFailed(ctx context.Context, jobID string) error
+	MarkFinished(ctx context.Context, jobID string, startedAt *time.Time) error
+	MarkFailed(ctx context.Context, jobID string, startedAt *time.Time) error
+	RenewLease(ctx context.Context, jobID string, startedAt *time.Time) error
 }
 
 type Runner interface {
@@ -58,13 +61,14 @@ func NewWorker(
 	}
 
 	return &Worker{
-		repo:             repo,
-		runner:           runner,
-		callbackClient:   callbackClient,
-		metrics:          metrics,
-		pollInterval:     pollInterval,
-		callbackAttempts: callbackAttempts,
-		callbackBackoff:  callbackBackoff,
+		repo:               repo,
+		runner:             runner,
+		callbackClient:     callbackClient,
+		metrics:            metrics,
+		pollInterval:       pollInterval,
+		callbackAttempts:   callbackAttempts,
+		callbackBackoff:    callbackBackoff,
+		leaseRenewInterval: jobs.LeaseDuration / 3,
 	}
 }
 
@@ -93,16 +97,25 @@ func (w *Worker) processOne(ctx context.Context) error {
 	if job == nil {
 		return nil
 	}
+	if err := w.verifyLease(ctx, job); err != nil {
+		return fmt.Errorf("verify claimed job lease: %w", err)
+	}
+	jobCtx, cancelJob := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	go w.keepLease(jobCtx, cancelJob, job, heartbeatDone)
+	defer func() { cancelJob(); <-heartbeatDone }()
+	ctx = jobCtx
 
 	log.Printf("worker picked job id=%s submission_id=%s", job.ID, job.SubmissionID)
 
-	startedAt := time.Now().UTC()
+	startedAt := *job.StartedAt
 	status := "failed"
 	verdict := "system_error"
+	executionDuration := -time.Nanosecond // no trusted duration for an infrastructure failure
 	if w.metrics != nil {
 		w.metrics.RecordJobStarted()
 		defer func() {
-			w.metrics.RecordJobFinished(status, verdict, job.Language, time.Since(startedAt))
+			w.metrics.RecordJobFinished(status, verdict, languages.NormalizeLanguage(job.Language), executionDuration)
 		}()
 	}
 
@@ -115,8 +128,18 @@ func (w *Worker) processOne(ctx context.Context) error {
 	}); err != nil {
 		log.Printf("worker running callback failed job id=%s error=%v", job.ID, err)
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 
 	result, runErr := w.runner.Run(ctx, job)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// Fence a stale worker before it sends a final result to the backend.
+	if err := w.verifyLease(ctx, job); err != nil {
+		return fmt.Errorf("verify job lease: %w", err)
+	}
 
 	finishedAt := time.Now().UTC()
 
@@ -135,8 +158,8 @@ func (w *Worker) processOne(ctx context.Context) error {
 			TotalTests:  len(job.Tests),
 			Score:       0,
 
-			CompileTimeMs: intPtr(0),
-			RunTimeMs:     intPtr(0),
+			CompileTimeMs: nil,
+			RunTimeMs:     nil,
 			PeakMemoryKb:  nil,
 			ExitCode:      intPtr(-1),
 
@@ -149,17 +172,20 @@ func (w *Worker) processOne(ctx context.Context) error {
 			Tests:      []callback.TestResult{},
 		})
 		if callbackErr != nil {
-			_ = w.repo.MarkFailed(ctx, job.ID)
+			_ = w.repo.MarkFailed(ctx, job.ID, job.StartedAt)
 			return fmt.Errorf("send internal error callback: %w", callbackErr)
 		}
 
-		if err := w.repo.MarkFailed(ctx, job.ID); err != nil {
+		if err := w.repo.MarkFailed(ctx, job.ID, job.StartedAt); err != nil {
 			return fmt.Errorf("mark job failed: %w", err)
 		}
 
 		return nil
 	}
 	verdict = result.Verdict
+	if !result.CompileTimeUnavailable && !result.RunTimeUnavailable {
+		executionDuration = time.Duration(result.DurationMS) * time.Millisecond
+	}
 
 	callbackErr := w.sendResultWithRetry(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
 		JudgeSubmissionID: job.ID,
@@ -173,12 +199,12 @@ func (w *Worker) processOne(ctx context.Context) error {
 		TotalTests:  result.TotalTests,
 		Score:       result.Score,
 
-		CompileTimeMs: intPtr(result.CompileTimeMS),
-		RunTimeMs:     intPtr(result.RunTimeMS),
+		CompileTimeMs: measuredTime(result.CompileTimeMS, result.CompileTimeUnavailable),
+		RunTimeMs:     measuredTime(result.RunTimeMS, result.RunTimeUnavailable),
 		PeakMemoryKb:  nullableInt(result.PeakMemoryKB),
 		ExitCode:      intPtr(result.ExitCode),
 
-		CompileLog:      stringPtr(""),
+		CompileLog:      stringPtr(result.CompileLog),
 		StdoutTruncated: stringPtr(truncateString(result.Stdout, job.Limits.OutputKB*1024)),
 		StderrTruncated: stringPtr(truncateString(result.Stderr, job.Limits.OutputKB*1024)),
 
@@ -187,11 +213,11 @@ func (w *Worker) processOne(ctx context.Context) error {
 		Tests:      toCallbackTests(result.TestResults),
 	})
 	if callbackErr != nil {
-		_ = w.repo.MarkFailed(ctx, job.ID)
+		_ = w.repo.MarkFailed(ctx, job.ID, job.StartedAt)
 		return fmt.Errorf("send callback: %w", callbackErr)
 	}
 
-	if err := w.repo.MarkFinished(ctx, job.ID); err != nil {
+	if err := w.repo.MarkFinished(ctx, job.ID, job.StartedAt); err != nil {
 		return fmt.Errorf("mark job finished: %w", err)
 	}
 	status = "finished"
@@ -206,6 +232,36 @@ func (w *Worker) processOne(ctx context.Context) error {
 	)
 
 	return nil
+}
+
+func (w *Worker) verifyLease(ctx context.Context, job *jobs.Job) error {
+	if job.StartedAt == nil {
+		return jobs.ErrLeaseLost
+	}
+	leaseCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+	defer stop()
+	return w.repo.RenewLease(leaseCtx, job.ID, job.StartedAt)
+}
+
+func (w *Worker) keepLease(ctx context.Context, cancel context.CancelFunc, job *jobs.Job, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(w.leaseRenewInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			renewCtx, stop := context.WithTimeout(ctx, 5*time.Second)
+			err := w.repo.RenewLease(renewCtx, job.ID, job.StartedAt)
+			stop()
+			if err != nil {
+				log.Printf("job lease renewal failed job_id=%s err=%v", job.ID, err)
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 func (w *Worker) sendResultWithRetry(
@@ -302,7 +358,7 @@ func toCallbackTests(results []runner.TestResult) []callback.TestResult {
 		out = append(out, callback.TestResult{
 			TestCaseID:     r.TestCaseID,
 			Status:         r.Status,
-			TimeMs:         intPtr(r.TimeMS),
+			TimeMs:         measuredTime(r.TimeMS, r.TimeUnavailable),
 			MemoryKb:       nullableInt(r.MemoryKB),
 			ExitCode:       intPtr(r.ExitCode),
 			CheckerMessage: nullableString(r.CheckerMessage),
@@ -310,4 +366,11 @@ func toCallbackTests(results []runner.TestResult) []callback.TestResult {
 	}
 
 	return out
+}
+
+func measuredTime(value int, unavailable bool) *int {
+	if unavailable {
+		return nil
+	}
+	return intPtr(value)
 }

@@ -154,10 +154,19 @@ func inspectDockerImage(ctx context.Context, image string) error {
 
 func (a *App) Run(ctx context.Context) error {
 	defer a.db.Close()
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	defer func() {
+		stopWorker()
+		select {
+		case <-workerDone:
+		case <-time.After(a.cfg.ShutdownTimeout):
+		}
+	}()
 
 	errCh := make(chan error, 1)
 
-	go a.worker.Run(ctx)
+	go func() { defer close(workerDone); a.worker.Run(workerCtx) }()
 
 	go func() {
 		log.Printf("judge service listening on %s", a.cfg.Address())
