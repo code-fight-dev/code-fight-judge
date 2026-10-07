@@ -2,10 +2,13 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"code-fight-judge/internal/callback"
 )
 
 type Config struct {
@@ -73,20 +76,35 @@ func Load() (Config, error) {
 		JudgeMaxOutputDirMB:   getInt("JUDGE_MAX_OUTPUT_DIR_MB", 128),
 	}
 
-	if cfg.AppEnv != "prod" {
-		if cfg.JudgeAPIToken == "" {
-			cfg.JudgeAPIToken = "dev-judge-api-token"
-		}
-		if cfg.JudgeCallbackToken == "" {
-			cfg.JudgeCallbackToken = "dev-judge-callback-token"
-		}
-	}
-
 	if strings.TrimSpace(cfg.HTTPPort) == "" {
 		return Config{}, fmt.Errorf("HTTP_PORT is required")
 	}
 	if cfg.DatabaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
+	}
+	if cfg.JudgeAPIToken == "" || cfg.JudgeAPIToken == "dev-judge-api-token" {
+		return Config{}, fmt.Errorf("JUDGE_API_TOKEN must be explicitly configured and must not be the development token")
+	}
+	if cfg.JudgeCallbackURL == "" {
+		return Config{}, fmt.Errorf("JUDGE_CALLBACK_URL is required")
+	}
+	if err := callback.ValidateURL(cfg.JudgeCallbackURL); err != nil {
+		return Config{}, fmt.Errorf("JUDGE_CALLBACK_URL: %w", err)
+	}
+	if cfg.JudgeCallbackToken == "" || cfg.JudgeCallbackToken == "dev-judge-callback-token" {
+		return Config{}, fmt.Errorf("JUDGE_CALLBACK_TOKEN must be explicitly configured and must not be the development token")
+	}
+	if cfg.JudgeCPUCount <= 0 || math.IsNaN(cfg.JudgeCPUCount) || math.IsInf(cfg.JudgeCPUCount, 0) {
+		return Config{}, fmt.Errorf("JUDGE_CPU_COUNT must be finite and > 0")
+	}
+	if cfg.JudgeDefaultPids <= 0 {
+		return Config{}, fmt.Errorf("JUDGE_DEFAULT_PIDS must be > 0")
+	}
+	if cfg.JudgeDefaultTmpfsMB <= 0 {
+		return Config{}, fmt.Errorf("JUDGE_DEFAULT_TMPFS_MB must be > 0")
+	}
+	if cfg.JudgeDefaultMemoryMB < 6 {
+		return Config{}, fmt.Errorf("JUDGE_DEFAULT_MEMORY_MB must be >= 6")
 	}
 	if strings.TrimSpace(cfg.JudgeWorkDir) == "" {
 		return Config{}, fmt.Errorf("JUDGE_WORKDIR is required")
@@ -103,8 +121,8 @@ func Load() (Config, error) {
 	if cfg.JudgeMaxTimeMS <= 0 {
 		return Config{}, fmt.Errorf("JUDGE_MAX_TIME_MS must be > 0")
 	}
-	if cfg.JudgeMaxMemoryMB <= 0 {
-		return Config{}, fmt.Errorf("JUDGE_MAX_MEMORY_MB must be > 0")
+	if cfg.JudgeMaxMemoryMB < 6 {
+		return Config{}, fmt.Errorf("JUDGE_MAX_MEMORY_MB must be >= 6")
 	}
 	if cfg.JudgeMaxOutputKB <= 0 {
 		return Config{}, fmt.Errorf("JUDGE_MAX_OUTPUT_KB must be > 0")
@@ -125,14 +143,11 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("JUDGE_MAX_OUTPUT_DIR_MB must be > 0")
 	}
 	if cfg.AppEnv == "prod" {
-		if cfg.JudgeAPIToken == "" {
-			return Config{}, fmt.Errorf("JUDGE_API_TOKEN is required in prod")
+		if !strings.HasPrefix(cfg.JudgeCallbackURL, "https://") {
+			return Config{}, fmt.Errorf("JUDGE_CALLBACK_URL must use HTTPS in prod")
 		}
-		if cfg.JudgeCallbackURL == "" {
-			return Config{}, fmt.Errorf("JUDGE_CALLBACK_URL is required in prod")
-		}
-		if cfg.JudgeCallbackToken == "" {
-			return Config{}, fmt.Errorf("JUDGE_CALLBACK_TOKEN is required in prod")
+		if cfg.JudgeRuntime != "runsc" {
+			return Config{}, fmt.Errorf("JUDGE_RUNTIME must be runsc in prod")
 		}
 		if !strings.Contains(cfg.JudgeGoImage, "@sha256:") {
 			return Config{}, fmt.Errorf("JUDGE_GO_IMAGE must be pinned by digest in prod")

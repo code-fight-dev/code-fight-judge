@@ -49,12 +49,8 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 			return
 		}
 
-		if h.cfg.JudgeCallbackURL != "" {
-			req.CallbackURL = h.cfg.JudgeCallbackURL
-		}
-		if h.cfg.JudgeCallbackToken != "" {
-			req.CallbackToken = h.cfg.JudgeCallbackToken
-		}
+		req.CallbackURL = h.cfg.JudgeCallbackURL
+		req.CallbackToken = h.cfg.JudgeCallbackToken
 
 		if err := validateSubmitRequest(req, h.languages, h.cfg); err != nil {
 			writeError(w, stdhttp.StatusBadRequest, "validation_error", err.Error())
@@ -67,7 +63,7 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 			return
 		}
 		if h.metrics != nil {
-			h.metrics.RecordJobCreated(req.Language)
+			h.metrics.RecordJobCreated(languages.NormalizeLanguage(req.Language))
 		}
 
 		resp := jobs.SubmitResponse{
@@ -99,8 +95,8 @@ func validateSubmitRequest(req jobs.SubmitRequest, languageRegistry *languages.R
 		return errors.New("limits.time_ms must be > 0")
 	case req.Limits.TimeMS > cfg.JudgeMaxTimeMS:
 		return errors.New("limits.time_ms exceeds maximum")
-	case req.Limits.MemoryMB <= 0:
-		return errors.New("limits.memory_mb must be > 0")
+	case req.Limits.MemoryMB < 6:
+		return errors.New("limits.memory_mb must be >= 6")
 	case req.Limits.MemoryMB > cfg.JudgeMaxMemoryMB:
 		return errors.New("limits.memory_mb exceeds maximum")
 	case req.Limits.OutputKB <= 0:

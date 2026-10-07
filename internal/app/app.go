@@ -79,7 +79,7 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	executor := sandbox.NewRunscExecutor()
 
 	runnerSvc := runner.NewService(cfg, executor, languageRegistry)
-	callbackClient := callback.NewClient(10 * time.Second)
+	callbackClient := callback.NewClient(10*time.Second, cfg.JudgeCallbackURL)
 
 	worker := queue.NewWorker(
 		jobsRepo,
