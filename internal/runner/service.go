@@ -474,6 +474,8 @@ func writeSourceFiles(workspaceDir string, language languages.Definition, source
 
 		mainFile := filepath.Join(workspaceDir, language.SourceFile)
 		return os.WriteFile(mainFile, []byte(pythonSolveHarness), 0644)
+	case languages.CPPLanguage:
+		return writeCPPSource(workspaceDir, sourceCode)
 
 	default:
 		mainFile := filepath.Join(workspaceDir, language.SourceFile)

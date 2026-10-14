@@ -6,15 +6,23 @@ import (
 )
 
 const (
-	GoLanguage     = "go"
-	GoVersion      = "1.24"
-	PythonLanguage = "python"
-	PythonVersion  = "3.12"
+	GoLanguage         = "go"
+	GoVersion          = "1.24"
+	PythonLanguage     = "python"
+	PythonVersion      = "3.12"
+	CPPLanguage        = "cpp"
+	CPPVersion         = "20"
+	JavaScriptLanguage = "javascript"
+	JavaScriptVersion  = "node24"
+	TypeScriptLanguage = "typescript"
+	TypeScriptVersion  = "5.9.3"
 )
 
 type RuntimeImages struct {
 	Go     string
 	Python string
+	CPP    string
+	Node   string
 }
 
 type Definition struct {
@@ -42,8 +50,32 @@ func NewDefaultRegistry(images RuntimeImages) *Registry {
 	if strings.TrimSpace(images.Python) == "" {
 		images.Python = "judge-python:3.12"
 	}
+	if strings.TrimSpace(images.CPP) == "" {
+		images.CPP = "judge-cpp:20"
+	}
+	if strings.TrimSpace(images.Node) == "" {
+		images.Node = "judge-node:24"
+	}
 
 	return NewRegistry([]Definition{
+		{
+			Language: CPPLanguage, Version: CPPVersion, Image: images.CPP,
+			SourceFile:     "main.cpp",
+			CompileCommand: []string{"g++", "-std=c++20", "-O2", "-pipe", "/workspace/main.cpp", "-o", "/output/program"},
+			RunCommand:     []string{"/output/program"},
+		},
+		{
+			Language: JavaScriptLanguage, Version: JavaScriptVersion, Image: images.Node,
+			SourceFile:     "solution.js",
+			CompileCommand: []string{"node", "/opt/judge-node/compile.cjs", "/workspace/solution.js", "/output/solution.cjs"},
+			RunCommand:     []string{"node", "/opt/judge-node/run.cjs", "/output/solution.cjs"},
+		},
+		{
+			Language: TypeScriptLanguage, Version: TypeScriptVersion, Image: images.Node,
+			SourceFile:     "solution.ts",
+			CompileCommand: []string{"node", "/opt/judge-node/compile.cjs", "/workspace/solution.ts", "/output/solution.cjs"},
+			RunCommand:     []string{"node", "/opt/judge-node/run.cjs", "/output/solution.cjs"},
+		},
 		{
 			Language:       GoLanguage,
 			Version:        GoVersion,

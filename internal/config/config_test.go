@@ -20,6 +20,8 @@ var configEnvKeys = []string{
 	"JUDGE_WORKDIR",
 	"JUDGE_GO_IMAGE",
 	"JUDGE_PYTHON_IMAGE",
+	"JUDGE_CPP_IMAGE",
+	"JUDGE_NODE_IMAGE",
 	"JUDGE_RUNTIME",
 	"JUDGE_CPU_COUNT",
 	"JUDGE_DEFAULT_MEMORY_MB",
@@ -60,6 +62,9 @@ func TestLoadUsesDefaultsWithExplicitCredentials(t *testing.T) {
 	}
 	if cfg.JudgeGoImage != "judge-go:1.24" || cfg.JudgePythonImage != "judge-python:3.12" {
 		t.Fatalf("judge images = %q/%q, want defaults", cfg.JudgeGoImage, cfg.JudgePythonImage)
+	}
+	if cfg.JudgeCPPImage != "judge-cpp:20" || cfg.JudgeNodeImage != "judge-node:24" {
+		t.Fatalf("new image defaults = %q/%q", cfg.JudgeCPPImage, cfg.JudgeNodeImage)
 	}
 	if cfg.JudgeMaxTimeMS != 10000 || cfg.JudgeMaxMemoryMB != 1024 || cfg.JudgeMaxOutputKB != 256 {
 		t.Fatalf("judge limits = time %d memory %d output %d, want defaults", cfg.JudgeMaxTimeMS, cfg.JudgeMaxMemoryMB, cfg.JudgeMaxOutputKB)
@@ -266,6 +271,8 @@ func TestLoadAcceptsProductionPinnedImages(t *testing.T) {
 	t.Setenv("JUDGE_CALLBACK_TOKEN", "callback-token")
 	t.Setenv("JUDGE_GO_IMAGE", "judge-go@sha256:abc")
 	t.Setenv("JUDGE_PYTHON_IMAGE", "judge-python@sha256:def")
+	t.Setenv("JUDGE_CPP_IMAGE", "judge-cpp@sha256:abc")
+	t.Setenv("JUDGE_NODE_IMAGE", "judge-node@sha256:def")
 
 	cfg, err := Load()
 	if err != nil {
@@ -273,6 +280,23 @@ func TestLoadAcceptsProductionPinnedImages(t *testing.T) {
 	}
 	if cfg.JudgeAPIToken != "judge-api-token" {
 		t.Fatalf("JudgeAPIToken = %q, want judge-api-token", cfg.JudgeAPIToken)
+	}
+}
+
+func TestLoadRequiresNewRuntimeImagePinsInProduction(t *testing.T) {
+	for _, key := range []string{"JUDGE_CPP_IMAGE", "JUDGE_NODE_IMAGE"} {
+		t.Run(key, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("APP_ENV", "prod")
+			t.Setenv("DATABASE_URL", "postgres://judge:test@localhost:5432/judge")
+			for _, image := range []string{"JUDGE_GO_IMAGE", "JUDGE_PYTHON_IMAGE", "JUDGE_CPP_IMAGE", "JUDGE_NODE_IMAGE"} {
+				t.Setenv(image, "runtime@sha256:abc")
+			}
+			t.Setenv(key, "runtime:latest")
+			if _, err := Load(); err == nil || err.Error() != key+" must be pinned by digest in prod" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
 	}
 }
 
