@@ -84,15 +84,17 @@ jobs:
         run: docker build -f docker/judge-node/Dockerfile -t judge-node-ci .
 
       - name: Test supervisor with real containers
+        timeout-minutes: 10
         env:
           JUDGE_SANDBOX_INTEGRATION: "1"
+          JUDGE_COMPILE_TIMEOUT: 60s
           JUDGE_INTEGRATION_RUNTIME: runc
           JUDGE_INTEGRATION_GO_IMAGE: judge-go-ci
           JUDGE_INTEGRATION_PYTHON_IMAGE: judge-python-ci
           JUDGE_INTEGRATION_CPP_IMAGE: judge-cpp-ci
           JUDGE_INTEGRATION_NODE_IMAGE: judge-node-ci
           JUDGE_TEST_DATABASE_URL: postgres://judge:judge-ci-password@localhost:5432/judge?sslmode=disable
-        run: go test -tags integration ./internal/runner ./internal/storage
+        run: go test -count=1 -v -tags integration ./internal/runner ./internal/storage
 
   deploy:
     name: Deploy judge

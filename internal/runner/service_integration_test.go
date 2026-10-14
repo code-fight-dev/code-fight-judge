@@ -138,6 +138,36 @@ func TestRunnerIntegrationTrustedTimeout(t *testing.T) {
 	}
 }
 
+func TestRunnerIntegrationCompileTimeout(t *testing.T) {
+	cfg, registry := realSandboxIntegrationConfig(t)
+	cfg.JudgeCompileTimeout = 100 * time.Millisecond
+	definition, ok := registry.Lookup(languages.GoLanguage, languages.GoVersion)
+	if !ok {
+		t.Fatal("Go runtime is missing")
+	}
+	// A deliberately stalled compiler verifies the separate compilation budget
+	// without depending on the host's compiler performance.
+	definition.CompileCommand = []string{"sh", "-c", "sleep 20"}
+	service := NewService(cfg, sandbox.NewRunscExecutor(), languages.NewRegistry([]languages.Definition{definition}))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	result, err := service.Run(ctx, &jobs.Job{
+		ID: "compile-timeout-integration", Language: languages.GoLanguage, LanguageVersion: languages.GoVersion,
+		SourceCode: "func Solve(input string) string { return input }",
+		Limits:     jobs.Limits{TimeMS: 2000, MemoryMB: 128, OutputKB: 1},
+		Tests:      []jobs.TestCase{{ID: "case", Input: "ok", ExpectedOutput: "ok", Points: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Verdict != "time_limit_exceeded" || result.ErrorMessage != "compile time limit exceeded" {
+		t.Fatalf("result=%+v, want compilation timeout", result)
+	}
+	if result.CompileTimeMS < 100 || result.RunTimeMS != 0 || len(result.TestResults) != 0 {
+		t.Fatalf("unexpected compilation timeout accounting: %+v", result)
+	}
+}
+
 func TestRunnerIntegrationOutputFlood(t *testing.T) {
 	result := runSecurityCase(t, "import sys\ndef solve(input_data):\n    while True:\n        sys.stdout.write('x' * 4096)\n", 2000, 128, 1, "output_limit_exceeded")
 	if len(result.Stdout)+len(result.Stderr) > 1024 {
@@ -150,7 +180,9 @@ func TestRunnerIntegrationDetachedDescendantCannotHoldOutputOpen(t *testing.T) {
 }
 
 func TestRunnerIntegrationOOM(t *testing.T) {
-	runSecurityCase(t, "def solve(input_data):\n    data = bytearray(256 * 1024 * 1024)\n    return str(len(data))\n", 3000, 128, 1, "memory_limit_exceeded")
+	// Dirty every page: a zero-filled allocation can remain backed by shared
+	// zero pages and never charge the requested size to the memory cgroup.
+	runSecurityCase(t, "def solve(input_data):\n    data = bytearray(256 * 1024 * 1024)\n    for offset in range(0, len(data), 4096):\n        data[offset] = 1\n    return str(len(data))\n", 3000, 128, 1, "memory_limit_exceeded")
 }
 
 func runSecurityCase(t *testing.T, source string, timeMS, memoryMB, outputKB int, verdict string) *RunResult {
@@ -194,6 +226,11 @@ func realSandboxIntegrationConfig(t *testing.T) (config.Config, *languages.Regis
 	requireDockerImage(t, ctx, cppImage)
 	requireDockerImage(t, ctx, nodeImage)
 
+	compileLimit, err := time.ParseDuration(getEnv("JUDGE_COMPILE_TIMEOUT", config.DefaultCompileTimeout.String()))
+	if err != nil || compileLimit <= 0 {
+		t.Fatalf("invalid JUDGE_COMPILE_TIMEOUT: %q", os.Getenv("JUDGE_COMPILE_TIMEOUT"))
+	}
+
 	cfg := config.Config{
 		JudgeWorkDir:         t.TempDir(),
 		JudgeRuntime:         runtimeName,
@@ -201,6 +238,7 @@ func realSandboxIntegrationConfig(t *testing.T) (config.Config, *languages.Regis
 		JudgeDefaultMemoryMB: 256,
 		JudgeMaxMemoryMB:     1024,
 		JudgeMaxTimeMS:       10000,
+		JudgeCompileTimeout:  compileLimit,
 		JudgeMaxOutputKB:     256,
 		JudgeDefaultPids:     64,
 		JudgeDefaultTmpfsMB:  64,
