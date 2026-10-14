@@ -20,7 +20,10 @@ var configEnvKeys = []string{
 	"JUDGE_WORKDIR",
 	"JUDGE_GO_IMAGE",
 	"JUDGE_PYTHON_IMAGE",
+	"JUDGE_CPP_IMAGE",
+	"JUDGE_NODE_IMAGE",
 	"JUDGE_RUNTIME",
+	"JUDGE_COMPILE_TIMEOUT",
 	"JUDGE_CPU_COUNT",
 	"JUDGE_DEFAULT_MEMORY_MB",
 	"JUDGE_DEFAULT_PIDS",
@@ -37,7 +40,7 @@ var configEnvKeys = []string{
 	"JUDGE_MAX_OUTPUT_DIR_MB",
 }
 
-func TestLoadUsesDevDefaults(t *testing.T) {
+func TestLoadUsesDefaultsWithExplicitCredentials(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("DATABASE_URL", "postgres://judge:test@localhost:5432/judge")
 
@@ -52,17 +55,23 @@ func TestLoadUsesDevDefaults(t *testing.T) {
 	if cfg.HTTPHost != "0.0.0.0" || cfg.HTTPPort != "8081" {
 		t.Fatalf("HTTP address = %q:%q, want 0.0.0.0:8081", cfg.HTTPHost, cfg.HTTPPort)
 	}
-	if cfg.JudgeAPIToken != "dev-judge-api-token" {
+	if cfg.JudgeAPIToken != "test-api-token" {
 		t.Fatalf("JudgeAPIToken = %q, want dev token", cfg.JudgeAPIToken)
 	}
-	if cfg.JudgeCallbackToken != "dev-judge-callback-token" {
+	if cfg.JudgeCallbackToken != "test-callback-token" {
 		t.Fatalf("JudgeCallbackToken = %q, want dev callback token", cfg.JudgeCallbackToken)
 	}
 	if cfg.JudgeGoImage != "judge-go:1.24" || cfg.JudgePythonImage != "judge-python:3.12" {
 		t.Fatalf("judge images = %q/%q, want defaults", cfg.JudgeGoImage, cfg.JudgePythonImage)
 	}
+	if cfg.JudgeCPPImage != "judge-cpp:20" || cfg.JudgeNodeImage != "judge-node:24" {
+		t.Fatalf("new image defaults = %q/%q", cfg.JudgeCPPImage, cfg.JudgeNodeImage)
+	}
 	if cfg.JudgeMaxTimeMS != 10000 || cfg.JudgeMaxMemoryMB != 1024 || cfg.JudgeMaxOutputKB != 256 {
 		t.Fatalf("judge limits = time %d memory %d output %d, want defaults", cfg.JudgeMaxTimeMS, cfg.JudgeMaxMemoryMB, cfg.JudgeMaxOutputKB)
+	}
+	if cfg.JudgeCompileTimeout != time.Minute {
+		t.Fatalf("JudgeCompileTimeout = %s, want 1m", cfg.JudgeCompileTimeout)
 	}
 }
 
@@ -82,6 +91,7 @@ func TestLoadReadsConfiguredValues(t *testing.T) {
 	t.Setenv("JUDGE_GO_IMAGE", "go-image:test")
 	t.Setenv("JUDGE_PYTHON_IMAGE", "python-image:test")
 	t.Setenv("JUDGE_RUNTIME", "runc")
+	t.Setenv("JUDGE_COMPILE_TIMEOUT", "45s")
 	t.Setenv("JUDGE_CPU_COUNT", "1.5")
 	t.Setenv("JUDGE_DEFAULT_MEMORY_MB", "512")
 	t.Setenv("JUDGE_DEFAULT_PIDS", "128")
@@ -117,6 +127,9 @@ func TestLoadReadsConfiguredValues(t *testing.T) {
 	if cfg.JudgeCPUCount != 1.5 {
 		t.Fatalf("JudgeCPUCount = %v, want 1.5", cfg.JudgeCPUCount)
 	}
+	if cfg.JudgeCompileTimeout != 45*time.Second {
+		t.Fatalf("JudgeCompileTimeout = %s, want 45s", cfg.JudgeCompileTimeout)
+	}
 	if cfg.JudgeCallbackAttempts != 7 || cfg.JudgeCallbackBackoff != 750*time.Millisecond {
 		t.Fatalf("callback retry = %d/%s, want 7/750ms", cfg.JudgeCallbackAttempts, cfg.JudgeCallbackBackoff)
 	}
@@ -144,6 +157,18 @@ func TestLoadValidatesPositiveLimits(t *testing.T) {
 		value   string
 		wantErr string
 	}{
+		{
+			name:    "zero compile timeout",
+			key:     "JUDGE_COMPILE_TIMEOUT",
+			value:   "0s",
+			wantErr: "JUDGE_COMPILE_TIMEOUT must be > 0",
+		},
+		{
+			name:    "negative compile timeout",
+			key:     "JUDGE_COMPILE_TIMEOUT",
+			value:   "-1s",
+			wantErr: "JUDGE_COMPILE_TIMEOUT must be > 0",
+		},
 		{
 			name:    "max time",
 			key:     "JUDGE_MAX_TIME_MS",
@@ -196,14 +221,14 @@ func TestLoadValidatesProductionRequirements(t *testing.T) {
 		{
 			name:    "api token",
 			env:     map[string]string{},
-			wantErr: "JUDGE_API_TOKEN is required in prod",
+			wantErr: "JUDGE_API_TOKEN must be explicitly configured and must not be the development token",
 		},
 		{
 			name: "callback url",
 			env: map[string]string{
 				"JUDGE_API_TOKEN": "judge-api-token",
 			},
-			wantErr: "JUDGE_CALLBACK_URL is required in prod",
+			wantErr: "JUDGE_CALLBACK_URL is required",
 		},
 		{
 			name: "callback token",
@@ -211,7 +236,7 @@ func TestLoadValidatesProductionRequirements(t *testing.T) {
 				"JUDGE_API_TOKEN":    "judge-api-token",
 				"JUDGE_CALLBACK_URL": "https://backend.example.test/callback",
 			},
-			wantErr: "JUDGE_CALLBACK_TOKEN is required in prod",
+			wantErr: "JUDGE_CALLBACK_TOKEN must be explicitly configured and must not be the development token",
 		},
 		{
 			name: "go image digest",
@@ -239,6 +264,9 @@ func TestLoadValidatesProductionRequirements(t *testing.T) {
 			clearConfigEnv(t)
 			t.Setenv("APP_ENV", "prod")
 			t.Setenv("DATABASE_URL", "postgres://judge:test@localhost:5432/judge")
+			t.Setenv("JUDGE_API_TOKEN", "")
+			t.Setenv("JUDGE_CALLBACK_URL", "")
+			t.Setenv("JUDGE_CALLBACK_TOKEN", "")
 			for key, value := range tt.env {
 				t.Setenv(key, value)
 			}
@@ -263,6 +291,8 @@ func TestLoadAcceptsProductionPinnedImages(t *testing.T) {
 	t.Setenv("JUDGE_CALLBACK_TOKEN", "callback-token")
 	t.Setenv("JUDGE_GO_IMAGE", "judge-go@sha256:abc")
 	t.Setenv("JUDGE_PYTHON_IMAGE", "judge-python@sha256:def")
+	t.Setenv("JUDGE_CPP_IMAGE", "judge-cpp@sha256:abc")
+	t.Setenv("JUDGE_NODE_IMAGE", "judge-node@sha256:def")
 
 	cfg, err := Load()
 	if err != nil {
@@ -270,6 +300,23 @@ func TestLoadAcceptsProductionPinnedImages(t *testing.T) {
 	}
 	if cfg.JudgeAPIToken != "judge-api-token" {
 		t.Fatalf("JudgeAPIToken = %q, want judge-api-token", cfg.JudgeAPIToken)
+	}
+}
+
+func TestLoadRequiresNewRuntimeImagePinsInProduction(t *testing.T) {
+	for _, key := range []string{"JUDGE_CPP_IMAGE", "JUDGE_NODE_IMAGE"} {
+		t.Run(key, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv("APP_ENV", "prod")
+			t.Setenv("DATABASE_URL", "postgres://judge:test@localhost:5432/judge")
+			for _, image := range []string{"JUDGE_GO_IMAGE", "JUDGE_PYTHON_IMAGE", "JUDGE_CPP_IMAGE", "JUDGE_NODE_IMAGE"} {
+				t.Setenv(image, "runtime@sha256:abc")
+			}
+			t.Setenv(key, "runtime:latest")
+			if _, err := Load(); err == nil || err.Error() != key+" must be pinned by digest in prod" {
+				t.Fatalf("Load() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -324,5 +371,37 @@ func clearConfigEnv(t *testing.T) {
 
 	for _, key := range configEnvKeys {
 		t.Setenv(key, "")
+	}
+	t.Setenv("JUDGE_API_TOKEN", "test-api-token")
+	t.Setenv("JUDGE_CALLBACK_TOKEN", "test-callback-token")
+	t.Setenv("JUDGE_CALLBACK_URL", "https://backend.example.test/callback")
+}
+
+func TestLoadRejectsDevelopmentTokensInEveryEnvironment(t *testing.T) {
+	for _, env := range []string{"dev", "stage", "prod"} {
+		for _, key := range []string{"JUDGE_API_TOKEN", "JUDGE_CALLBACK_TOKEN"} {
+			clearConfigEnv(t)
+			t.Setenv("APP_ENV", env)
+			t.Setenv("DATABASE_URL", "postgres://judge:test@localhost/judge")
+			value := "dev-judge-api-token"
+			if key == "JUDGE_CALLBACK_TOKEN" {
+				value = "dev-judge-callback-token"
+			}
+			t.Setenv(key, value)
+			if _, err := Load(); err == nil {
+				t.Fatalf("%s accepted default token in %s", key, env)
+			}
+		}
+	}
+}
+
+func TestLoadRejectsInvalidCPUQuota(t *testing.T) {
+	for _, value := range []string{"0", "-1", "NaN", "+Inf"} {
+		clearConfigEnv(t)
+		t.Setenv("DATABASE_URL", "postgres://judge:test@localhost/judge")
+		t.Setenv("JUDGE_CPU_COUNT", value)
+		if _, err := Load(); err == nil {
+			t.Fatalf("accepted CPU quota %s", value)
+		}
 	}
 }

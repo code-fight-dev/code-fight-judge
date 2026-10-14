@@ -11,7 +11,7 @@ import (
 )
 
 func TestNewClientUsesDefaultTimeout(t *testing.T) {
-	client := NewClient(0)
+	client := NewClient(0, "https://backend.example.test/callback")
 
 	if client.httpClient.Timeout != 10*time.Second {
 		t.Fatalf("NewClient(0).Timeout = %s, want 10s", client.httpClient.Timeout)
@@ -19,7 +19,7 @@ func TestNewClientUsesDefaultTimeout(t *testing.T) {
 }
 
 func TestNewClientUsesProvidedTimeout(t *testing.T) {
-	client := NewClient(250 * time.Millisecond)
+	client := NewClient(250*time.Millisecond, "https://backend.example.test/callback")
 
 	if client.httpClient.Timeout != 250*time.Millisecond {
 		t.Fatalf("NewClient(250ms).Timeout = %s, want 250ms", client.httpClient.Timeout)
@@ -80,7 +80,7 @@ func TestSendResultPostsPayloadWithJudgeToken(t *testing.T) {
 		},
 	}
 
-	client := NewClient(time.Second)
+	client := NewClient(time.Second, server.URL)
 	err := client.SendResult(context.Background(), server.URL, "callback-token", payload)
 	if err != nil {
 		t.Fatalf("SendResult() error = %v", err)
@@ -107,7 +107,7 @@ func TestSendResultPostsPayloadWithJudgeToken(t *testing.T) {
 }
 
 func TestSendResultRejectsEmptyURL(t *testing.T) {
-	client := NewClient(time.Second)
+	client := NewClient(time.Second, "https://backend.example.test/callback")
 
 	err := client.SendResult(context.Background(), "", "callback-token", ResultRequest{})
 	if err == nil {
@@ -119,13 +119,13 @@ func TestSendResultRejectsEmptyURL(t *testing.T) {
 }
 
 func TestSendResultRejectsInvalidURL(t *testing.T) {
-	client := NewClient(time.Second)
+	client := NewClient(time.Second, "://bad-url")
 
 	err := client.SendResult(context.Background(), "://bad-url", "callback-token", ResultRequest{})
 	if err == nil {
 		t.Fatal("SendResult() error = nil, want error")
 	}
-	if !strings.Contains(err.Error(), "create callback request") {
+	if !strings.Contains(err.Error(), "callback url must") {
 		t.Fatalf("SendResult() error = %q, want create callback request", err.Error())
 	}
 }
@@ -136,7 +136,7 @@ func TestSendResultReturnsErrorForNonSuccessStatus(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(time.Second)
+	client := NewClient(time.Second, server.URL)
 	err := client.SendResult(context.Background(), server.URL, "callback-token", ResultRequest{})
 	if err == nil {
 		t.Fatal("SendResult() error = nil, want error")
@@ -155,12 +155,49 @@ func TestSendResultReturnsErrorWhenContextIsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	client := NewClient(time.Second)
+	client := NewClient(time.Second, server.URL)
 	err := client.SendResult(ctx, server.URL, "callback-token", ResultRequest{})
 	if err == nil {
 		t.Fatal("SendResult() error = nil, want error")
 	}
 	if !strings.Contains(err.Error(), "send callback request") {
 		t.Fatalf("SendResult() error = %q, want send callback request", err.Error())
+	}
+}
+
+func TestCallbackRejectsRedirectWithoutSendingToken(t *testing.T) {
+	var reached bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true; w.WriteHeader(http.StatusNoContent) }))
+	defer destination.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+	client := NewClient(time.Second, origin.URL)
+	if err := client.SendResult(context.Background(), origin.URL, "secret", ResultRequest{}); err == nil {
+		t.Fatal("redirect accepted")
+	}
+	if reached {
+		t.Fatal("callback followed redirect and leaked token")
+	}
+}
+
+func TestCallbackRejectsUnconfiguredDestinationBeforeConnecting(t *testing.T) {
+	client := NewClient(time.Second, "https://backend.example.test/callback")
+	if err := client.SendResult(context.Background(), "http://127.0.0.1/private", "secret", ResultRequest{}); err == nil || !strings.Contains(err.Error(), "configured target") {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestValidateCallbackURL(t *testing.T) {
+	for _, value := range []string{"file:///etc/passwd", "http://user:pass@example.test/", "http://example.test/#fragment", "/callback", "https://"} {
+		if err := ValidateURL(value); err == nil {
+			t.Fatalf("accepted URL %q", value)
+		}
+	}
+	for _, value := range []string{"http://127.0.0.1:8080/callback", "https://backend.example.test/callback"} {
+		if err := ValidateURL(value); err != nil {
+			t.Fatalf("rejected operator URL %q: %v", value, err)
+		}
 	}
 }

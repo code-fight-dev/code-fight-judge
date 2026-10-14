@@ -4,7 +4,6 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
   workflow_dispatch:
 
 concurrency:
@@ -15,6 +14,20 @@ jobs:
   judge-checks:
     name: Judge checks
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: judge
+          POSTGRES_PASSWORD: judge-ci-password
+          POSTGRES_DB: judge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U judge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - name: Checkout judge
@@ -29,6 +42,23 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Setup Node runtime for adapter tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install local adapter dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nlohmann-json3-dev
+          npm install --prefix /tmp/judge-node-tests --ignore-scripts --no-audit --no-fund --save-exact typescript@5.9.3 @types/node@24.3.0
+
+      - name: Test C++ and Node adapters
+        env:
+          JUDGE_LOCAL_RUNTIME_TESTS: "1"
+          JUDGE_TEST_NODE_MODULES: /tmp/judge-node-tests/node_modules
+        run: go test -tags integration ./internal/runner -run '^TestLocal(CPP|Node)'
+
       - name: Go vet
         run: go vet ./...
 
@@ -42,10 +72,29 @@ jobs:
         run: docker build -t codefight-judge-ci .
 
       - name: Docker build Go runtime
-        run: docker build -t judge-go-ci ./docker/judge-go
+        run: docker build -f docker/judge-go/Dockerfile -t judge-go-ci .
 
       - name: Docker build Python runtime
-        run: docker build -t judge-python-ci ./docker/judge-python
+        run: docker build -f docker/judge-python/Dockerfile -t judge-python-ci .
+
+      - name: Docker build C++ runtime
+        run: docker build -f docker/judge-cpp/Dockerfile -t judge-cpp-ci .
+
+      - name: Docker build Node runtime
+        run: docker build -f docker/judge-node/Dockerfile -t judge-node-ci .
+
+      - name: Test supervisor with real containers
+        timeout-minutes: 10
+        env:
+          JUDGE_SANDBOX_INTEGRATION: "1"
+          JUDGE_COMPILE_TIMEOUT: 60s
+          JUDGE_INTEGRATION_RUNTIME: runc
+          JUDGE_INTEGRATION_GO_IMAGE: judge-go-ci
+          JUDGE_INTEGRATION_PYTHON_IMAGE: judge-python-ci
+          JUDGE_INTEGRATION_CPP_IMAGE: judge-cpp-ci
+          JUDGE_INTEGRATION_NODE_IMAGE: judge-node-ci
+          JUDGE_TEST_DATABASE_URL: postgres://judge:judge-ci-password@localhost:5432/judge?sslmode=disable
+        run: go test -count=1 -v -tags integration ./internal/runner ./internal/storage
 
   deploy:
     name: Deploy judge

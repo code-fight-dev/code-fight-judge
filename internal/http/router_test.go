@@ -7,6 +7,7 @@ import (
 	"errors"
 	stdhttp "net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -136,15 +137,11 @@ func TestRouterListsSupportedLanguages(t *testing.T) {
 
 	var body []languages.SupportedLanguage
 	decodeJSON(t, response, &body)
-	if len(body) != 2 {
-		t.Fatalf("GET /languages len = %d, want 2", len(body))
+	want := languages.NewDefaultRegistry(languages.RuntimeImages{}).Supported()
+	if !reflect.DeepEqual(body, want) {
+		t.Fatalf("GET /languages = %#v, want %#v", body, want)
 	}
-	if body[0].Language != languages.GoLanguage || body[0].Version != languages.GoVersion {
-		t.Fatalf("GET /languages[0] = %#v, want go 1.24", body[0])
-	}
-	if body[1].Language != languages.PythonLanguage || body[1].Version != languages.PythonVersion {
-		t.Fatalf("GET /languages[1] = %#v, want python 3.12", body[1])
-	}
+
 }
 
 func TestCreateSubmissionAcceptsValidRequest(t *testing.T) {
@@ -309,7 +306,7 @@ func TestValidateSubmitRequestRejectsInvalidRequests(t *testing.T) {
 			mutate: func(req *jobs.SubmitRequest) {
 				req.Limits.MemoryMB = 0
 			},
-			wantErr: "limits.memory_mb must be > 0",
+			wantErr: "limits.memory_mb must be >= 6",
 		},
 		{
 			name: "memory max",
@@ -493,6 +490,7 @@ func testConfig() config.Config {
 		JudgeMaxTests:      128,
 		JudgeMaxTestBytes:  1 << 20,
 		JudgeCallbackToken: "default-callback-token",
+		JudgeCallbackURL:   "https://backend.example.test/callback",
 	}
 }
 

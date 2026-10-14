@@ -1,6 +1,9 @@
 package languages
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestRegistryLookupNormalizesLanguageAndVersion(t *testing.T) {
 	registry := NewDefaultRegistry(RuntimeImages{
@@ -56,22 +59,11 @@ func TestRegistrySupportedReturnsPublicLanguageList(t *testing.T) {
 	})
 
 	supported := registry.Supported()
-	if len(supported) != 2 {
-		t.Fatalf("Supported() len = %d, want 2", len(supported))
+	want := []SupportedLanguage{{CPPLanguage, CPPVersion}, {GoLanguage, GoVersion}, {JavaScriptLanguage, JavaScriptVersion}, {PythonLanguage, PythonVersion}, {TypeScriptLanguage, TypeScriptVersion}}
+	if !reflect.DeepEqual(supported, want) {
+		t.Fatalf("Supported() = %#v, want %#v", supported, want)
 	}
 
-	if supported[0].Language != GoLanguage {
-		t.Fatalf("Supported()[0].Language = %q, want %q", supported[0].Language, GoLanguage)
-	}
-	if supported[0].Version != GoVersion {
-		t.Fatalf("Supported()[0].Version = %q, want %q", supported[0].Version, GoVersion)
-	}
-	if supported[1].Language != PythonLanguage {
-		t.Fatalf("Supported()[1].Language = %q, want %q", supported[1].Language, PythonLanguage)
-	}
-	if supported[1].Version != PythonVersion {
-		t.Fatalf("Supported()[1].Version = %q, want %q", supported[1].Version, PythonVersion)
-	}
 }
 
 func TestRegistryIsSupported(t *testing.T) {

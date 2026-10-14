@@ -65,12 +65,14 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	languageRegistry := languages.NewDefaultRegistry(languages.RuntimeImages{
 		Go:     cfg.JudgeGoImage,
 		Python: cfg.JudgePythonImage,
+		CPP:    cfg.JudgeCPPImage,
+		Node:   cfg.JudgeNodeImage,
 	})
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg, judgeMetrics)
 	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
 	readiness := readinessChecker{
 		db:            db,
-		images:        []string{cfg.JudgeGoImage, cfg.JudgePythonImage},
+		images:        []string{cfg.JudgeGoImage, cfg.JudgePythonImage, cfg.JudgeCPPImage, cfg.JudgeNodeImage},
 		checkDocker:   checkDockerVersion,
 		inspectDocker: inspectDockerImage,
 	}
@@ -79,7 +81,7 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	executor := sandbox.NewRunscExecutor()
 
 	runnerSvc := runner.NewService(cfg, executor, languageRegistry)
-	callbackClient := callback.NewClient(10 * time.Second)
+	callbackClient := callback.NewClient(10*time.Second, cfg.JudgeCallbackURL)
 
 	worker := queue.NewWorker(
 		jobsRepo,
@@ -154,10 +156,19 @@ func inspectDockerImage(ctx context.Context, image string) error {
 
 func (a *App) Run(ctx context.Context) error {
 	defer a.db.Close()
+	workerCtx, stopWorker := context.WithCancel(ctx)
+	workerDone := make(chan struct{})
+	defer func() {
+		stopWorker()
+		select {
+		case <-workerDone:
+		case <-time.After(a.cfg.ShutdownTimeout):
+		}
+	}()
 
 	errCh := make(chan error, 1)
 
-	go a.worker.Run(ctx)
+	go func() { defer close(workerDone); a.worker.Run(workerCtx) }()
 
 	go func() {
 		log.Printf("judge service listening on %s", a.cfg.Address())

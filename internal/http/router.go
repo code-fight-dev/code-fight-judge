@@ -40,7 +40,9 @@ func withCommonMiddleware(cfg config.Config, next stdhttp.Handler) stdhttp.Handl
 func requireJudgeToken(expected string, next stdhttp.HandlerFunc) stdhttp.HandlerFunc {
 	expected = strings.TrimSpace(expected)
 	if expected == "" {
-		return next
+		return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+			writeError(w, stdhttp.StatusServiceUnavailable, "misconfigured", "judge authentication is not configured")
+		}
 	}
 
 	return func(w stdhttp.ResponseWriter, r *stdhttp.Request) {

@@ -1,6 +1,13 @@
 package jobs
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+const LeaseDuration = 2 * time.Minute
+
+var ErrLeaseLost = errors.New("job lease lost")
 
 type Status string
 
