@@ -436,11 +436,11 @@ func compileMemoryMB(cfg config.Config, runMemoryMB int) int {
 }
 
 func compileTimeout(cfg config.Config) time.Duration {
-	if cfg.JudgeMaxTimeMS > 0 {
-		return time.Duration(cfg.JudgeMaxTimeMS) * time.Millisecond
+	if cfg.JudgeCompileTimeout > 0 {
+		return cfg.JudgeCompileTimeout
 	}
 
-	return 0
+	return config.DefaultCompileTimeout
 }
 
 func writeSourceFiles(workspaceDir string, language languages.Definition, sourceCode string) error {

@@ -81,7 +81,7 @@ func NewDefaultRegistry(images RuntimeImages) *Registry {
 			Version:        GoVersion,
 			Image:          images.Go,
 			SourceFile:     "main.go",
-			CompileCommand: []string{"sh", "-c", "go build -o /output/program /workspace/*.go"},
+			CompileCommand: []string{"sh", "-c", "GOMAXPROCS=1 go build -p 1 -o /output/program /workspace/*.go"},
 			RunCommand:     []string{"sh", "-c", "/output/program"},
 		},
 		{

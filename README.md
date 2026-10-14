@@ -126,6 +126,7 @@ go run ./cmd/judge
 | `JUDGE_WORKDIR` | Directory for submission workspaces |
 | `JUDGE_GO_IMAGE`, `JUDGE_PYTHON_IMAGE`, `JUDGE_CPP_IMAGE`, `JUDGE_NODE_IMAGE` | Runtime image references |
 | `JUDGE_RUNTIME` | Docker runtime; defaults to `runsc` |
+| `JUDGE_COMPILE_TIMEOUT` | Independent compiler wall-time limit; defaults to `60s` |
 | `JUDGE_CPU_COUNT`, `JUDGE_DEFAULT_PIDS`, `JUDGE_DEFAULT_TMPFS_MB` | Sandbox resource settings |
 | `JUDGE_MAX_*` | Upper bounds on submission limits and test payloads |
 
@@ -142,8 +143,9 @@ artifacts have a separate directory size limit.
 
 `time_ms` limits wall time per test, including runtime startup and input
 decoding but excluding container startup. `run_time_ms` sums executed tests;
-compilation time is reported separately. Timeout and OOM verdicts use trusted
-execution results rather than interpreting process exit codes alone.
+compilation time is reported separately and bounded by `JUDGE_COMPILE_TIMEOUT`.
+Timeout and OOM verdicts use trusted execution results rather than interpreting
+process exit codes alone.
 
 `memory_kb` reports the lifetime cgroup peak for the whole sandbox, including
 the runtime, supervisor, descendants, tmpfs, and sandbox overhead. Missing
