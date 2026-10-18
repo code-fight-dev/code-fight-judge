@@ -4,6 +4,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,6 +48,11 @@ func TestLocalCPPFunctionPrograms(t *testing.T) {
 int main() { std::cout << "own program"; }`, []struct{ input, want, errorText string }{{"anything", "own program", ""}}},
 		{"comment and raw literal", `// int main() {}
 int Solve(int value) { std::string text = R"demo(" main() Solve())demo"; return value; }`, []struct{ input, want, errorText string }{{"3", "3", ""}}},
+		{"decimal separators", `#include <iostream>
+constexpr int limit = 1'000'000; int main() { std::cout << limit; }`, []struct{ input, want, errorText string }{{"", "1000000", ""}}},
+		{"hex separators", `#include <iostream>
+constexpr int limit = 0xAB'CD; int main() { std::cout << limit; }`, []struct{ input, want, errorText string }{{"", "43981", ""}}},
+		{"separators before solve", `constexpr int limit = 0b1'000; int solve() { return limit; }`, []struct{ input, want, errorText string }{{"", "8", ""}}},
 		{"zero args", `int Solve() { return 42; }`, []struct{ input, want, errorText string }{{"", "42", ""}, {"3", "", "unexpected input"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +97,10 @@ function Solve(input) { return input === "false"; }`, "false", "true", "", ""},
 		{"TS raw boolean", "ts", `function Solve(input: string): boolean { return input === "aba"; }`, "aba\n", "true", "", ""},
 		{"TS string alias", "ts", `type Input = string; function Solve(input: Input): boolean { return input === "false"; }`, "false", "true", "", ""},
 		{"TS arrow", "ts", `const Solve = (values: number[][]): number[][] => values;`, "[[1,2],[3]]", "[[1,2],[3]]", "", ""},
+		{"TS module scope", "ts", `const name = "ok"; const length = 3; function Solve(): string { return name + length; }`, "", "ok3", "", ""},
+		{"JS premature exit", "js", `function Solve() { process.exit(0); }`, "", "", "exited before completing", ""},
+		{"JS top-level exit", "js", `process.exit(0); function Solve() { return ""; }`, "", "", "exited before completing", ""},
+		{"JS delayed result", "js", `async function Solve() { return await new Promise(resolve => setTimeout(() => resolve(42), 20)); }`, "", "42", "", ""},
 		{"TS type error", "ts", `function Solve(value: number): number { return "wrong"; }`, "1", "", "", "not assignable"},
 		{"JS syntax error", "js", `function Solve( {`, "", "", "", "error TS"},
 		{"missing entry", "js", `function other(value) { return value; }`, "1", "", "", "top-level function"},
@@ -208,5 +218,23 @@ func TestRunnerIntegrationNewLanguageLimits(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLocalNodePendingPromise(t *testing.T) {
+	requireLocalRuntimes(t)
+	runner, err := filepath.Abs(filepath.Join("..", "..", "docker", "judge-node", "run.cjs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(t.TempDir(), "solution.cjs")
+	if err := os.WriteFile(source, []byte(`exports.__cfEntry = () => new Promise(() => {}); exports.__cfArity = 0;`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "node", runner, source).CombinedOutput()
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) || err == nil {
+		t.Fatalf("pending promise exited before timeout: error=%v output=%s", err, output)
 	}
 }

@@ -106,7 +106,18 @@ async function main() {
     process.stdout.write(output);
   }
 }
+const keepAlive = setInterval(() => {}, 1000);
+let completed = false;
+process.on("exit", (code) => {
+  if (!completed && code === 0) {
+    console.error("Solve exited before completing");
+    process.exitCode = 1;
+  }
+});
 main().catch((error) => {
   console.error(error.message);
   process.exitCode = 1;
+}).finally(() => {
+  completed = true;
+  clearInterval(keepAlive);
 });

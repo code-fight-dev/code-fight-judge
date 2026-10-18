@@ -73,6 +73,7 @@ const bridge =
 const options = {
   target: ts.ScriptTarget.ES2022,
   module: ts.ModuleKind.CommonJS,
+  moduleDetection: ts.ModuleDetectionKind.Force,
   moduleResolution: ts.ModuleResolutionKind.Node10,
   strict: true,
   allowJs: javascript,

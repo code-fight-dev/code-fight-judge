@@ -55,6 +55,15 @@ func cppCodeOnly(source string) string {
 					end = start + close + len(delimiter) + 2
 				}
 			}
+		case source[i] >= '0' && source[i] <= '9':
+			end = i + 1
+			for end < len(source) {
+				c := source[end]
+				if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' || c == '.' || c == '\'') {
+					break
+				}
+				end++
+			}
 		case source[i] == '"' || source[i] == '\'':
 			quote := source[i]
 			end = i + 1
