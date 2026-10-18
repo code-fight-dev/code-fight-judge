@@ -21,6 +21,7 @@ var configEnvKeys = []string{
 	"JUDGE_GO_IMAGE",
 	"JUDGE_PYTHON_IMAGE",
 	"JUDGE_RUNTIME",
+	"JUDGE_COMPILE_TIMEOUT",
 	"JUDGE_CPU_COUNT",
 	"JUDGE_DEFAULT_MEMORY_MB",
 	"JUDGE_DEFAULT_PIDS",
@@ -64,6 +65,9 @@ func TestLoadUsesDefaultsWithExplicitCredentials(t *testing.T) {
 	if cfg.JudgeMaxTimeMS != 10000 || cfg.JudgeMaxMemoryMB != 1024 || cfg.JudgeMaxOutputKB != 256 {
 		t.Fatalf("judge limits = time %d memory %d output %d, want defaults", cfg.JudgeMaxTimeMS, cfg.JudgeMaxMemoryMB, cfg.JudgeMaxOutputKB)
 	}
+	if cfg.JudgeCompileTimeout != time.Minute {
+		t.Fatalf("JudgeCompileTimeout = %s, want 1m", cfg.JudgeCompileTimeout)
+	}
 }
 
 func TestLoadReadsConfiguredValues(t *testing.T) {
@@ -82,6 +86,7 @@ func TestLoadReadsConfiguredValues(t *testing.T) {
 	t.Setenv("JUDGE_GO_IMAGE", "go-image:test")
 	t.Setenv("JUDGE_PYTHON_IMAGE", "python-image:test")
 	t.Setenv("JUDGE_RUNTIME", "runc")
+	t.Setenv("JUDGE_COMPILE_TIMEOUT", "45s")
 	t.Setenv("JUDGE_CPU_COUNT", "1.5")
 	t.Setenv("JUDGE_DEFAULT_MEMORY_MB", "512")
 	t.Setenv("JUDGE_DEFAULT_PIDS", "128")
@@ -117,6 +122,9 @@ func TestLoadReadsConfiguredValues(t *testing.T) {
 	if cfg.JudgeCPUCount != 1.5 {
 		t.Fatalf("JudgeCPUCount = %v, want 1.5", cfg.JudgeCPUCount)
 	}
+	if cfg.JudgeCompileTimeout != 45*time.Second {
+		t.Fatalf("JudgeCompileTimeout = %s, want 45s", cfg.JudgeCompileTimeout)
+	}
 	if cfg.JudgeCallbackAttempts != 7 || cfg.JudgeCallbackBackoff != 750*time.Millisecond {
 		t.Fatalf("callback retry = %d/%s, want 7/750ms", cfg.JudgeCallbackAttempts, cfg.JudgeCallbackBackoff)
 	}
@@ -144,6 +152,18 @@ func TestLoadValidatesPositiveLimits(t *testing.T) {
 		value   string
 		wantErr string
 	}{
+		{
+			name:    "zero compile timeout",
+			key:     "JUDGE_COMPILE_TIMEOUT",
+			value:   "0s",
+			wantErr: "JUDGE_COMPILE_TIMEOUT must be > 0",
+		},
+		{
+			name:    "negative compile timeout",
+			key:     "JUDGE_COMPILE_TIMEOUT",
+			value:   "-1s",
+			wantErr: "JUDGE_COMPILE_TIMEOUT must be > 0",
+		},
 		{
 			name:    "max time",
 			key:     "JUDGE_MAX_TIME_MS",

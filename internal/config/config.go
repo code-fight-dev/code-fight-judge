@@ -11,6 +11,8 @@ import (
 	"code-fight-judge/internal/callback"
 )
 
+const DefaultCompileTimeout = time.Minute
+
 type Config struct {
 	AppEnv          string
 	HTTPHost        string
@@ -27,6 +29,7 @@ type Config struct {
 	JudgeGoImage          string
 	JudgePythonImage      string
 	JudgeRuntime          string
+	JudgeCompileTimeout   time.Duration
 	JudgeCPUCount         float64
 	JudgeDefaultMemoryMB  int
 	JudgeDefaultPids      int
@@ -60,6 +63,7 @@ func Load() (Config, error) {
 		JudgeGoImage:          getString("JUDGE_GO_IMAGE", "judge-go:1.24"),
 		JudgePythonImage:      getString("JUDGE_PYTHON_IMAGE", "judge-python:3.12"),
 		JudgeRuntime:          getString("JUDGE_RUNTIME", "runsc"),
+		JudgeCompileTimeout:   getDuration("JUDGE_COMPILE_TIMEOUT", DefaultCompileTimeout),
 		JudgeCPUCount:         getFloat64("JUDGE_CPU_COUNT", 1),
 		JudgeDefaultMemoryMB:  getInt("JUDGE_DEFAULT_MEMORY_MB", 256),
 		JudgeDefaultPids:      getInt("JUDGE_DEFAULT_PIDS", 64),
@@ -117,6 +121,9 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.JudgeRuntime) == "" {
 		return Config{}, fmt.Errorf("JUDGE_RUNTIME is required")
+	}
+	if cfg.JudgeCompileTimeout <= 0 {
+		return Config{}, fmt.Errorf("JUDGE_COMPILE_TIMEOUT must be > 0")
 	}
 	if cfg.JudgeMaxTimeMS <= 0 {
 		return Config{}, fmt.Errorf("JUDGE_MAX_TIME_MS must be > 0")

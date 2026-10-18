@@ -108,7 +108,7 @@ func TestRunSkipsCompileForPython(t *testing.T) {
 	}
 }
 
-func TestRunUsesMaxMemoryForCompileAndTaskMemoryForRun(t *testing.T) {
+func TestRunUsesSeparateCompileAndTaskLimits(t *testing.T) {
 	executor := &fakeExecutor{}
 	registry := languages.NewDefaultRegistry(languages.RuntimeImages{
 		Go:     "judge-go:test",
@@ -121,6 +121,7 @@ func TestRunUsesMaxMemoryForCompileAndTaskMemoryForRun(t *testing.T) {
 		JudgeDefaultMemoryMB: 256,
 		JudgeMaxMemoryMB:     1024,
 		JudgeMaxTimeMS:       10000,
+		JudgeCompileTimeout:  45 * time.Second,
 		JudgeMaxOutputKB:     256,
 		JudgeDefaultPids:     64,
 		JudgeDefaultTmpfsMB:  64,
@@ -157,7 +158,7 @@ func TestRunUsesMaxMemoryForCompileAndTaskMemoryForRun(t *testing.T) {
 	if got, want := executor.requests[0].MemoryMB, 1024; got != want {
 		t.Fatalf("compile MemoryMB = %d, want %d", got, want)
 	}
-	if got, want := executor.requests[0].Timeout, 10*time.Second; got != want {
+	if got, want := executor.requests[0].Timeout, 45*time.Second; got != want {
 		t.Fatalf("compile Timeout = %s, want %s", got, want)
 	}
 	if got, want := executor.requests[1].MemoryMB, 128; got != want {
@@ -165,6 +166,14 @@ func TestRunUsesMaxMemoryForCompileAndTaskMemoryForRun(t *testing.T) {
 	}
 	if got, want := executor.requests[1].Timeout, time.Second; got != want {
 		t.Fatalf("run Timeout = %s, want %s", got, want)
+	}
+}
+
+func TestCompileTimeoutDefaultsIndependentlyOfTaskLimits(t *testing.T) {
+	for _, maxTimeMS := range []int{0, 100, 10000, 120000} {
+		if got := compileTimeout(config.Config{JudgeMaxTimeMS: maxTimeMS}); got != time.Minute {
+			t.Fatalf("task max=%dms: compile timeout=%s, want 1m", maxTimeMS, got)
+		}
 	}
 }
 
