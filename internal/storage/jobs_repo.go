@@ -100,15 +100,13 @@ func (r *JobsRepo) Create(ctx context.Context, req jobs.SubmitRequest) (*jobs.Jo
 }
 
 func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
-	now := time.Now().UTC()
-
 	row := r.pool.QueryRow(
 		ctx,
 		`
 		WITH picked AS (
 			SELECT id
 			FROM judge_jobs
-			WHERE status = $1 OR (status = $2 AND updated_at < clock_timestamp() - ($4 * interval '1 second'))
+			WHERE status = $1 OR (status = $2 AND updated_at < clock_timestamp() - ($3 * interval '1 second'))
 			ORDER BY created_at ASC
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
@@ -116,7 +114,7 @@ func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
 		UPDATE judge_jobs j
 		SET
 			status = $2,
-			started_at = $3,
+			started_at = GREATEST(clock_timestamp(), j.started_at + interval '1 microsecond'),
 			updated_at = clock_timestamp(),
 			finished_at = NULL
 		FROM picked
@@ -142,7 +140,6 @@ func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
 		`,
 		jobs.StatusQueued,
 		jobs.StatusRunning,
-		now,
 		jobs.LeaseDuration.Seconds(),
 	)
 

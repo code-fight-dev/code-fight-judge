@@ -150,12 +150,17 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	if live, err := repo.ClaimNextQueued(ctx); err != nil || live != nil {
 		t.Fatalf("live claim stolen: %#v err=%v", live, err)
 	}
-	if _, err := pool.Exec(ctx, `UPDATE judge_jobs SET updated_at=clock_timestamp()-interval '3 minutes' WHERE id=$1`, oldClaim.ID); err != nil {
+	// A previous worker's clock may have been ahead of the database clock.
+	if err := pool.QueryRow(ctx, `UPDATE judge_jobs SET updated_at=clock_timestamp()-interval '3 minutes',
+		started_at=clock_timestamp()+interval '1 day' WHERE id=$1 RETURNING started_at`, oldClaim.ID).Scan(&oldClaim.StartedAt); err != nil {
 		t.Fatal(err)
 	}
 	newClaim, err := repo.ClaimNextQueued(ctx)
 	if err != nil || newClaim == nil || newClaim.ID != oldClaim.ID {
 		t.Fatalf("reclaim=%#v err=%v", newClaim, err)
+	}
+	if newClaim.StartedAt == nil || !newClaim.StartedAt.After(*oldClaim.StartedAt) {
+		t.Fatalf("attempt marker did not increase: old=%v new=%v", oldClaim.StartedAt, newClaim.StartedAt)
 	}
 	if err := repo.RenewLease(ctx, oldClaim.ID, oldClaim.StartedAt); !errors.Is(err, jobs.ErrLeaseLost) {
 		t.Fatalf("stale renewal=%v", err)
