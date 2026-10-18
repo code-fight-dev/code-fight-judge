@@ -64,6 +64,8 @@ func cppCodeOnly(source string) string {
 				}
 				end++
 			}
+			// Keep names such as main2 distinct from the main entry point.
+			code.WriteByte('0')
 		case source[i] == '"' || source[i] == '\'':
 			quote := source[i]
 			end = i + 1

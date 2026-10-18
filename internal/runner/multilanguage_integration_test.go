@@ -53,6 +53,7 @@ constexpr int limit = 1'000'000; int main() { std::cout << limit; }`, []struct{ 
 		{"hex separators", `#include <iostream>
 constexpr int limit = 0xAB'CD; int main() { std::cout << limit; }`, []struct{ input, want, errorText string }{{"", "43981", ""}}},
 		{"separators before solve", `constexpr int limit = 0b1'000; int solve() { return limit; }`, []struct{ input, want, errorText string }{{"", "8", ""}}},
+		{"number in identifier", `int main2() { return 42; } int Solve() { return main2(); }`, []struct{ input, want, errorText string }{{"", "42", ""}}},
 		{"zero args", `int Solve() { return 42; }`, []struct{ input, want, errorText string }{{"", "42", ""}, {"3", "", "unexpected input"}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
