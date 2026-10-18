@@ -162,6 +162,31 @@ func TestRunnerIntegrationNewLanguages(t *testing.T) {
 	}
 }
 
+func TestRunnerIntegrationNodeCompletion(t *testing.T) {
+	cfg, registry := realSandboxIntegrationConfig(t)
+	service := NewService(cfg, sandbox.NewRunscExecutor(), registry)
+	for _, tc := range []struct{ name, body, verdict string }{
+		{"pending", `return new Promise(() => {});`, "time_limit_exceeded"},
+		{"exit", `process.exit(0);`, "runtime_error"},
+		{"empty", `return "";`, "accepted"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := service.Run(context.Background(), &jobs.Job{
+				ID: "node-completion-" + tc.name, Language: languages.JavaScriptLanguage, LanguageVersion: languages.JavaScriptVersion,
+				SourceCode: "function Solve() { " + tc.body + " }",
+				Limits:     jobs.Limits{TimeMS: 1000, MemoryMB: 256, OutputKB: 1},
+				Tests:      []jobs.TestCase{{ID: "one", ExpectedOutput: "", Points: 1}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Verdict != tc.verdict {
+				t.Fatalf("result=%+v want=%s", result, tc.verdict)
+			}
+		})
+	}
+}
+
 func integrationNewLanguage(t *testing.T, language, version, source string) {
 	t.Helper()
 	cfg, registry := realSandboxIntegrationConfig(t)
