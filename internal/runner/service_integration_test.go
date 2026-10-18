@@ -231,6 +231,11 @@ func realSandboxIntegrationConfig(t *testing.T) (config.Config, *languages.Regis
 		t.Fatalf("invalid JUDGE_COMPILE_TIMEOUT: %q", os.Getenv("JUDGE_COMPILE_TIMEOUT"))
 	}
 
+	compileLimit, err := time.ParseDuration(getEnv("JUDGE_COMPILE_TIMEOUT", config.DefaultCompileTimeout.String()))
+	if err != nil || compileLimit <= 0 {
+		t.Fatalf("invalid JUDGE_COMPILE_TIMEOUT: %q", os.Getenv("JUDGE_COMPILE_TIMEOUT"))
+	}
+
 	cfg := config.Config{
 		JudgeWorkDir:         t.TempDir(),
 		JudgeRuntime:         runtimeName,
