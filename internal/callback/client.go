@@ -6,21 +6,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 )
 
 type Client struct {
 	httpClient *http.Client
+	targetURL  string
 }
 
-func NewClient(timeout time.Duration) *Client {
+func NewClient(timeout time.Duration, targetURL string) *Client {
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
 
 	return &Client{
+		targetURL: targetURL,
 		httpClient: &http.Client{
 			Timeout: timeout,
+			// X-Judge-Token is not one of net/http's protected redirect headers.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 }
@@ -34,7 +39,7 @@ type ResultRequest struct {
 	PassedTests       int          `json:"passed_tests"`
 	TotalTests        int          `json:"total_tests"`
 	CompileTimeMs     *int         `json:"compile_time_ms"`
-	RunTimeMs          *int         `json:"run_time_ms"`
+	RunTimeMs         *int         `json:"run_time_ms"`
 	PeakMemoryKb      *int         `json:"peak_memory_kb"`
 	Score             int          `json:"score"`
 	ExitCode          *int         `json:"exit_code"`
@@ -64,6 +69,12 @@ func (c *Client) SendResult(
 	if callbackURL == "" {
 		return fmt.Errorf("callback url is empty")
 	}
+	if callbackURL != c.targetURL {
+		return fmt.Errorf("callback url differs from configured target")
+	}
+	if err := ValidateURL(callbackURL); err != nil {
+		return err
+	}
 
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -88,5 +99,15 @@ func (c *Client) SendResult(
 		return fmt.Errorf("callback failed with status %d", resp.StatusCode)
 	}
 
+	return nil
+}
+
+// Callback destinations are operator configuration, never submission input.
+// Private addresses remain valid for deployments with an internal backend.
+func ValidateURL(value string) error {
+	u, err := url.Parse(value)
+	if err != nil || u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("callback url must be an absolute HTTP(S) URL without credentials or fragment")
+	}
 	return nil
 }

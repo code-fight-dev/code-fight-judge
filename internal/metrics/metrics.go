@@ -162,11 +162,11 @@ func (m *JudgeMetrics) Middleware(next http.Handler) http.Handler {
 
 		m.httpInFlight.Dec()
 		m.httpRequestsTotal.WithLabelValues(
-			r.Method,
+			methodLabel(r.Method),
 			routeLabel(r),
 			strconv.Itoa(recorder.status),
 		).Inc()
-		m.httpRequestDuration.WithLabelValues(r.Method, routeLabel(r)).Observe(time.Since(startedAt).Seconds())
+		m.httpRequestDuration.WithLabelValues(methodLabel(r.Method), routeLabel(r)).Observe(time.Since(startedAt).Seconds())
 	})
 }
 
@@ -181,7 +181,9 @@ func (m *JudgeMetrics) RecordJobStarted() {
 func (m *JudgeMetrics) RecordJobFinished(status string, verdict string, language string, duration time.Duration) {
 	m.jobsRunning.Dec()
 	m.jobsFinishedTotal.WithLabelValues(status, verdict, language).Inc()
-	m.executionDuration.WithLabelValues(language).Observe(duration.Seconds())
+	if duration >= 0 {
+		m.executionDuration.WithLabelValues(language).Observe(duration.Seconds())
+	}
 
 	switch verdict {
 	case "time_limit_exceeded":
@@ -192,7 +194,7 @@ func (m *JudgeMetrics) RecordJobFinished(status string, verdict string, language
 		m.compileErrors.WithLabelValues(language).Inc()
 	case "runtime_error":
 		m.runtimeErrors.WithLabelValues(language).Inc()
-	case "output_directory_limit_exceeded":
+	case "output_directory_limit_exceeded", "output_limit_exceeded":
 		m.maxOutputExceeded.WithLabelValues(language).Inc()
 	}
 }
@@ -216,5 +218,14 @@ func routeLabel(r *http.Request) string {
 		return pattern
 	}
 
-	return r.URL.Path
+	return "unmatched"
+}
+
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions, http.MethodConnect, http.MethodTrace:
+		return method
+	default:
+		return "other"
+	}
 }

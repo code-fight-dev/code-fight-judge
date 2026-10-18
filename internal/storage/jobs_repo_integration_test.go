@@ -4,6 +4,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -105,7 +106,7 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 		t.Fatalf("ClaimNextQueued(first).Tests = %#v, want case-1", claimedFirst.Tests)
 	}
 
-	if err := repo.MarkFinished(ctx, claimedFirst.ID); err != nil {
+	if err := repo.MarkFinished(ctx, claimedFirst.ID, claimedFirst.StartedAt); err != nil {
 		t.Fatalf("MarkFinished() error = %v", err)
 	}
 	assertStoredStatus(t, ctx, pool, claimedFirst.ID, jobs.StatusFinished)
@@ -120,7 +121,7 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	if claimedSecond.ID != secondJob.ID {
 		t.Fatalf("ClaimNextQueued(second).ID = %q, want %q", claimedSecond.ID, secondJob.ID)
 	}
-	if err := repo.MarkFailed(ctx, claimedSecond.ID); err != nil {
+	if err := repo.MarkFailed(ctx, claimedSecond.ID, claimedSecond.StartedAt); err != nil {
 		t.Fatalf("MarkFailed() error = %v", err)
 	}
 	assertStoredStatus(t, ctx, pool, claimedSecond.ID, jobs.StatusFailed)
@@ -131,6 +132,44 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	}
 	if empty != nil {
 		t.Fatalf("ClaimNextQueued(empty) = %#v, want nil", empty)
+	}
+
+	// A live claim is not stolen; an expired claim is retried and its old owner
+	// can neither renew it nor complete the new owner's execution.
+	third, err := repo.Create(ctx, submitRequest("33333333-3333-3333-3333-333333333333", "cccccccc-cccc-cccc-cccc-cccccccccccc", "case-3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldClaim, err := repo.ClaimNextQueued(ctx)
+	if err != nil || oldClaim == nil || oldClaim.ID != third.ID {
+		t.Fatalf("claim=%#v err=%v", oldClaim, err)
+	}
+	if err := repo.RenewLease(ctx, oldClaim.ID, oldClaim.StartedAt); err != nil {
+		t.Fatal(err)
+	}
+	if live, err := repo.ClaimNextQueued(ctx); err != nil || live != nil {
+		t.Fatalf("live claim stolen: %#v err=%v", live, err)
+	}
+	// A previous worker's clock may have been ahead of the database clock.
+	if err := pool.QueryRow(ctx, `UPDATE judge_jobs SET updated_at=clock_timestamp()-interval '3 minutes',
+		started_at=clock_timestamp()+interval '1 day' WHERE id=$1 RETURNING started_at`, oldClaim.ID).Scan(&oldClaim.StartedAt); err != nil {
+		t.Fatal(err)
+	}
+	newClaim, err := repo.ClaimNextQueued(ctx)
+	if err != nil || newClaim == nil || newClaim.ID != oldClaim.ID {
+		t.Fatalf("reclaim=%#v err=%v", newClaim, err)
+	}
+	if newClaim.StartedAt == nil || !newClaim.StartedAt.After(*oldClaim.StartedAt) {
+		t.Fatalf("attempt marker did not increase: old=%v new=%v", oldClaim.StartedAt, newClaim.StartedAt)
+	}
+	if err := repo.RenewLease(ctx, oldClaim.ID, oldClaim.StartedAt); !errors.Is(err, jobs.ErrLeaseLost) {
+		t.Fatalf("stale renewal=%v", err)
+	}
+	if err := repo.MarkFinished(ctx, oldClaim.ID, oldClaim.StartedAt); !errors.Is(err, jobs.ErrLeaseLost) {
+		t.Fatalf("stale completion=%v", err)
+	}
+	if err := repo.MarkFinished(ctx, newClaim.ID, newClaim.StartedAt); err != nil {
+		t.Fatal(err)
 	}
 }
 

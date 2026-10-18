@@ -100,15 +100,15 @@ func TestRunSkipsCompileForPython(t *testing.T) {
 	if len(request.Command) == 0 {
 		t.Fatal("run request Command is empty")
 	}
-	if request.Command[0] != "sh" {
-		t.Fatalf("run request Command[0] = %q, want sh", request.Command[0])
+	if request.Command[0] != "python3" {
+		t.Fatalf("run request Command[0] = %q, want python3", request.Command[0])
 	}
 	if got, want := request.Command[len(request.Command)-3:], []string{"python3", "-B", "/workspace/main.py"}; !stringSlicesEqual(got, want) {
 		t.Fatalf("run command target = %#v, want %#v", got, want)
 	}
 }
 
-func TestRunUsesMaxMemoryForCompileAndTaskMemoryForRun(t *testing.T) {
+func TestRunUsesSeparateCompileAndTaskLimits(t *testing.T) {
 	executor := &fakeExecutor{}
 	registry := languages.NewDefaultRegistry(languages.RuntimeImages{
 		Go:     "judge-go:test",
@@ -121,6 +121,8 @@ func TestRunUsesMaxMemoryForCompileAndTaskMemoryForRun(t *testing.T) {
 		JudgeDefaultMemoryMB: 256,
 		JudgeMaxMemoryMB:     1024,
 		JudgeMaxTimeMS:       10000,
+		JudgeCompileTimeout:  45 * time.Second,
+		JudgeMaxOutputKB:     256,
 		JudgeDefaultPids:     64,
 		JudgeDefaultTmpfsMB:  64,
 	}, executor, registry)
@@ -156,14 +158,22 @@ func TestRunUsesMaxMemoryForCompileAndTaskMemoryForRun(t *testing.T) {
 	if got, want := executor.requests[0].MemoryMB, 1024; got != want {
 		t.Fatalf("compile MemoryMB = %d, want %d", got, want)
 	}
-	if got, want := executor.requests[0].Timeout, 10*time.Second; got != want {
+	if got, want := executor.requests[0].Timeout, 45*time.Second; got != want {
 		t.Fatalf("compile Timeout = %s, want %s", got, want)
 	}
 	if got, want := executor.requests[1].MemoryMB, 128; got != want {
 		t.Fatalf("run MemoryMB = %d, want %d", got, want)
 	}
-	if got, want := executor.requests[1].Timeout, 10*time.Second; got != want {
+	if got, want := executor.requests[1].Timeout, time.Second; got != want {
 		t.Fatalf("run Timeout = %s, want %s", got, want)
+	}
+}
+
+func TestCompileTimeoutDefaultsIndependentlyOfTaskLimits(t *testing.T) {
+	for _, maxTimeMS := range []int{0, 100, 10000, 120000} {
+		if got := compileTimeout(config.Config{JudgeMaxTimeMS: maxTimeMS}); got != time.Minute {
+			t.Fatalf("task max=%dms: compile timeout=%s, want 1m", maxTimeMS, got)
+		}
 	}
 }
 
@@ -188,6 +198,7 @@ func TestRunReportsCompileTimeout(t *testing.T) {
 		JudgeDefaultMemoryMB: 256,
 		JudgeMaxMemoryMB:     1024,
 		JudgeMaxTimeMS:       10000,
+		JudgeMaxOutputKB:     256,
 		JudgeDefaultPids:     64,
 		JudgeDefaultTmpfsMB:  64,
 	}, executor, registry)
@@ -225,119 +236,20 @@ func TestRunReportsCompileTimeout(t *testing.T) {
 	}
 }
 
-func TestRunWrapsRuntimeCommandWithInContainerTimeout(t *testing.T) {
+func TestRunUsesTrustedSupervisorLimits(t *testing.T) {
 	executor := &fakeExecutor{}
-	registry := languages.NewDefaultRegistry(languages.RuntimeImages{
-		Go:     "judge-go:test",
-		Python: "judge-python:test",
-	})
-	service := NewService(config.Config{
-		JudgeWorkDir:         t.TempDir(),
-		JudgeRuntime:         "runsc",
-		JudgeCPUCount:        1,
-		JudgeDefaultMemoryMB: 256,
-		JudgeMaxMemoryMB:     1024,
-		JudgeMaxTimeMS:       10000,
-		JudgeDefaultPids:     64,
-		JudgeDefaultTmpfsMB:  64,
-	}, executor, registry)
-
-	_, err := service.Run(context.Background(), &jobs.Job{
-		ID:              "job-go",
-		Language:        "go",
-		LanguageVersion: "1.24",
-		SourceCode:      "package main\n\nfunc Solve(input string) string { return \"ok\" }\n",
-		Limits: jobs.Limits{
-			TimeMS:   1500,
-			MemoryMB: 128,
-			OutputKB: 64,
-		},
-		Tests: []jobs.TestCase{
-			{
-				ID:             "case-1",
-				Input:          "",
-				ExpectedOutput: "ok",
-				Points:         1,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+	job := testPythonJob()
+	job.Limits.TimeMS = 1500
+	if _, err := service.Run(context.Background(), job); err != nil {
+		t.Fatal(err)
 	}
-	if len(executor.requests) != 2 {
-		t.Fatalf("executor calls = %d, want compile + run", len(executor.requests))
+	req := executor.requests[0]
+	if !stringSlicesEqual(req.Command, []string{"python3", "-B", "/workspace/main.py"}) {
+		t.Fatalf("unexpected command: %v", req.Command)
 	}
-
-	runRequest := executor.requests[1]
-	if got, want := runRequest.Command[:5], []string{"sh", "-c", runtimeTimeoutScript, "judge-runtime-timeout", "1.500"}; !stringSlicesEqual(got, want) {
-		t.Fatalf("run command prefix = %#v, want %#v", got, want)
-	}
-	if got, want := runRequest.Command[len(runRequest.Command)-3:], []string{"sh", "-c", "/output/program"}; !stringSlicesEqual(got, want) {
-		t.Fatalf("run command target = %#v, want %#v", got, want)
-	}
-	if got, want := runRequest.Timeout, 10*time.Second; got != want {
-		t.Fatalf("run sandbox Timeout = %s, want %s", got, want)
-	}
-	for _, want := range []string{
-		`cat > "$input_file"`,
-		`"$@" < "$input_file" &`,
-		`rm -f "$input_file"`,
-	} {
-		if !strings.Contains(runtimeTimeoutScript, want) {
-			t.Fatalf("runtime timeout script does not contain %q\n%s", want, runtimeTimeoutScript)
-		}
-	}
-}
-
-func TestRunReportsInContainerRuntimeTimeout(t *testing.T) {
-	executor := &fakeExecutor{
-		results: []*sandbox.ExecuteResult{
-			{ExitCode: 0},
-			{ExitCode: runtimeTimeoutExitCode, DurationMS: 1500},
-		},
-	}
-	registry := languages.NewDefaultRegistry(languages.RuntimeImages{
-		Go:     "judge-go:test",
-		Python: "judge-python:test",
-	})
-	service := NewService(config.Config{
-		JudgeWorkDir:         t.TempDir(),
-		JudgeRuntime:         "runsc",
-		JudgeCPUCount:        1,
-		JudgeDefaultMemoryMB: 256,
-		JudgeMaxMemoryMB:     1024,
-		JudgeMaxTimeMS:       10000,
-		JudgeDefaultPids:     64,
-		JudgeDefaultTmpfsMB:  64,
-	}, executor, registry)
-
-	result, err := service.Run(context.Background(), &jobs.Job{
-		ID:              "job-go",
-		Language:        "go",
-		LanguageVersion: "1.24",
-		SourceCode:      "package main\n\nfunc Solve(input string) string { return \"ok\" }\n",
-		Limits: jobs.Limits{
-			TimeMS:   1500,
-			MemoryMB: 128,
-			OutputKB: 64,
-		},
-		Tests: []jobs.TestCase{
-			{
-				ID:             "case-1",
-				Input:          "",
-				ExpectedOutput: "ok",
-				Points:         1,
-			},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Run() error = %v", err)
-	}
-	if result.Verdict != "time_limit_exceeded" {
-		t.Fatalf("Run().Verdict = %q, want time_limit_exceeded", result.Verdict)
-	}
-	if result.ErrorMessage != "time limit exceeded" {
-		t.Fatalf("Run().ErrorMessage = %q, want time limit exceeded", result.ErrorMessage)
+	if req.Timeout != 1500*time.Millisecond || req.OutputKB != job.Limits.OutputKB {
+		t.Fatalf("unexpected limits: %#v", req)
 	}
 }
 
@@ -486,8 +398,8 @@ func TestRunReportsOutputDirectoryLimitExceeded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if result.Verdict != "memory_limit_exceeded" {
-		t.Fatalf("Run().Verdict = %q, want memory_limit_exceeded", result.Verdict)
+	if result.Verdict != "output_directory_limit_exceeded" {
+		t.Fatalf("Run().Verdict = %q, want output_directory_limit_exceeded", result.Verdict)
 	}
 	if result.ErrorMessage != "output directory limit exceeded" {
 		t.Fatalf("Run().ErrorMessage = %q, want output directory limit exceeded", result.ErrorMessage)
@@ -606,9 +518,10 @@ func TestRunContinuesAfterWrongAnswerAndScoresAcceptedTests(t *testing.T) {
 	executor := &fakeExecutor{
 		results: []*sandbox.ExecuteResult{
 			{
-				ExitCode:   0,
-				Stdout:     "wrong\n",
-				DurationMS: 10,
+				ExitCode:     0,
+				Stdout:       "wrong\n",
+				DurationMS:   10,
+				PeakMemoryKB: 256,
 			},
 			{
 				ExitCode:     0,
@@ -916,20 +829,6 @@ func TestRunnerHelperBranches(t *testing.T) {
 		t.Fatalf("compileMemoryMB(empty, run 128) = %d, want 128", got)
 	}
 
-	if got := sandboxTimeout(config.Config{}, 1000); got != 0 {
-		t.Fatalf("sandboxTimeout(empty, 1000) = %s, want 0", got)
-	}
-	if got := sandboxTimeout(config.Config{JudgeMaxTimeMS: 10000}, 0); got != 10*time.Second {
-		t.Fatalf("sandboxTimeout(max 10000, run 0) = %s, want 10s", got)
-	}
-
-	if got := commandWithRuntimeTimeout([]string{"run"}, 0); !stringSlicesEqual(got, []string{"run"}) {
-		t.Fatalf("commandWithRuntimeTimeout(no timeout) = %#v, want [run]", got)
-	}
-	if got := commandWithRuntimeTimeout(nil, 1000); len(got) != 0 {
-		t.Fatalf("commandWithRuntimeTimeout(nil) = %#v, want empty", got)
-	}
-
 	if got := maxInt(3, 7); got != 7 {
 		t.Fatalf("maxInt(3, 7) = %d, want 7", got)
 	}
@@ -945,6 +844,7 @@ func testRunnerConfig(t *testing.T) config.Config {
 		JudgeDefaultMemoryMB: 256,
 		JudgeMaxMemoryMB:     1024,
 		JudgeMaxTimeMS:       10000,
+		JudgeMaxOutputKB:     256,
 		JudgeDefaultPids:     64,
 		JudgeDefaultTmpfsMB:  64,
 		JudgeMaxOutputDirMB:  128,
@@ -992,5 +892,58 @@ func testPythonJob() *jobs.Job {
 				Points:         1,
 			},
 		},
+	}
+}
+
+func TestRuntimeExitCodesAreNotResourceVerdicts(t *testing.T) {
+	for _, code := range []int{124, 137} {
+		executor := &fakeExecutor{results: []*sandbox.ExecuteResult{{ExitCode: code, DurationMS: 5}}}
+		service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+		result, err := service.Run(context.Background(), testPythonJob())
+		if err != nil || result.Verdict != "runtime_error" {
+			t.Fatalf("exit=%d result=%#v err=%v", code, result, err)
+		}
+	}
+}
+
+func TestRuntimeExceedingMeasuredTimeCannotPass(t *testing.T) {
+	executor := &fakeExecutor{results: []*sandbox.ExecuteResult{{Stdout: "ok", DurationMS: 400}}}
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+	job := testPythonJob()
+	job.Limits.TimeMS = 100
+	result, err := service.Run(context.Background(), job)
+	if err != nil || result.Verdict != "time_limit_exceeded" {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestOutputLimitCannotBeBypassedBySkippingChecker(t *testing.T) {
+	executor := &fakeExecutor{results: []*sandbox.ExecuteResult{{Stdout: "partial", OutputExceeded: true}}}
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+	job := testPythonJob()
+	job.Tests[0].SkipOutputCheck = true
+	result, err := service.Run(context.Background(), job)
+	if err != nil || result.Verdict != "output_limit_exceeded" || result.Score != 0 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestMissingMemoryMeasurementMakesAggregateUnknown(t *testing.T) {
+	executor := &fakeExecutor{results: []*sandbox.ExecuteResult{{Stdout: "ok", PeakMemoryKB: 1024}, {Stdout: "ok", PeakMemoryKB: 0}}}
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+	job := testPythonJob()
+	job.Tests = append(job.Tests, job.Tests[0])
+	result, err := service.Run(context.Background(), job)
+	if err != nil || result.PeakMemoryKB != 0 || result.TestResults[0].MemoryKB != 1024 {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+}
+
+func TestCompileDiagnosticsSurviveSuccessfulExecution(t *testing.T) {
+	executor := &fakeExecutor{results: []*sandbox.ExecuteResult{{Stderr: "compiler warning"}, {Stdout: "ok"}}}
+	service := NewService(testRunnerConfig(t), executor, languages.NewDefaultRegistry(languages.RuntimeImages{}))
+	result, err := service.Run(context.Background(), testGoJob())
+	if err != nil || result.CompileLog != "compiler warning" {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }

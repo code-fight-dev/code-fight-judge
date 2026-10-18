@@ -1,4 +1,12 @@
+FROM golang:1.24-alpine AS supervisor-builder
+WORKDIR /src
+COPY go.mod ./
+COPY internal/supervisor ./internal/supervisor
+COPY cmd/judge-supervisor ./cmd/judge-supervisor
+RUN CGO_ENABLED=0 go build -o /judge-supervisor ./cmd/judge-supervisor
+
 FROM python:3.12-alpine
+COPY --from=supervisor-builder /judge-supervisor /usr/local/bin/judge-supervisor
 
 WORKDIR /workspace
 

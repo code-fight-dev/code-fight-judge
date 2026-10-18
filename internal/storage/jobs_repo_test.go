@@ -31,7 +31,7 @@ func (db *fakeJobsDB) Exec(ctx context.Context, sql string, arguments ...any) (p
 		sql:  sql,
 		args: append([]any(nil), arguments...),
 	})
-	return pgconn.CommandTag{}, db.execErr
+	return pgconn.NewCommandTag("UPDATE 1"), db.execErr
 }
 
 func (db *fakeJobsDB) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
@@ -300,7 +300,7 @@ func TestJobsRepoClaimNextQueuedWrapsInvalidTestsJSON(t *testing.T) {
 func TestJobsRepoMarkFinishedAndFailed(t *testing.T) {
 	tests := []struct {
 		name       string
-		mark       func(*JobsRepo, context.Context, string) error
+		mark       func(*JobsRepo, context.Context, string, *time.Time) error
 		wantStatus jobs.Status
 		wantSQL    string
 	}{
@@ -323,7 +323,7 @@ func TestJobsRepoMarkFinishedAndFailed(t *testing.T) {
 			db := &fakeJobsDB{}
 			repo := &JobsRepo{pool: db}
 
-			err := tt.mark(repo, context.Background(), "job-1")
+			err := tt.mark(repo, context.Background(), "job-1", timePtr(time.Now()))
 			if err != nil {
 				t.Fatalf("mark() error = %v", err)
 			}
@@ -343,7 +343,7 @@ func TestJobsRepoMarkFinishedAndFailed(t *testing.T) {
 func TestJobsRepoMarkErrors(t *testing.T) {
 	tests := []struct {
 		name    string
-		mark    func(*JobsRepo, context.Context, string) error
+		mark    func(*JobsRepo, context.Context, string, *time.Time) error
 		wantErr string
 	}{
 		{
@@ -363,7 +363,7 @@ func TestJobsRepoMarkErrors(t *testing.T) {
 			db := &fakeJobsDB{execErr: errors.New("update failed")}
 			repo := &JobsRepo{pool: db}
 
-			err := tt.mark(repo, context.Background(), "job-1")
+			err := tt.mark(repo, context.Background(), "job-1", timePtr(time.Now()))
 			if err == nil {
 				t.Fatalf("mark() error = nil, want %q", tt.wantErr)
 			}
@@ -373,3 +373,5 @@ func TestJobsRepoMarkErrors(t *testing.T) {
 		})
 	}
 }
+
+func timePtr(v time.Time) *time.Time { return &v }

@@ -1,12 +1,32 @@
 package metrics
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestArbitraryPathsAndMethodsDoNotCreateMetricSeries(t *testing.T) {
+	m := NewJudgeMetrics()
+	handler := m.Middleware(http.NewServeMux())
+	for i := 0; i < 1000; i++ {
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(fmt.Sprintf("CUSTOM%d", i), fmt.Sprintf("http://judge.example/unknown-%d", i), nil))
+	}
+	families, err := m.registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == "codefight_judge_http_requests_total" || family.GetName() == "codefight_judge_http_request_duration_seconds" {
+			if len(family.Metric) != 1 {
+				t.Fatalf("%s has %d label sets", family.GetName(), len(family.Metric))
+			}
+		}
+	}
+}
 
 func TestJudgeMetricsRecordsJobsAndCallbacks(t *testing.T) {
 	judgeMetrics := NewJudgeMetrics()
@@ -91,7 +111,7 @@ func TestJudgeMetricsMiddlewareUsesDefaultStatusAndURLPath(t *testing.T) {
 	}
 
 	body := scrapeMetrics(t, judgeMetrics)
-	if !strings.Contains(body, `codefight_judge_http_requests_total{method="GET",path="/healthz",status="200"} 1`) {
+	if !strings.Contains(body, `codefight_judge_http_requests_total{method="GET",path="unmatched",status="200"} 1`) {
 		t.Fatalf("metrics body does not contain /healthz 200 request\n%s", body)
 	}
 }

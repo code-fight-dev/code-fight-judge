@@ -27,14 +27,17 @@ type ExecuteRequest struct {
 	TmpfsSizeMB  int
 	RuntimeName  string
 	Timeout      time.Duration
+	OutputKB     int
 }
 
 type ExecuteResult struct {
-	ExitCode     int
-	Stdout       string
-	Stderr       string
-	DurationMS   int64
-	PeakMemoryKB int
-	TimedOut     bool
-	OOMKilled    bool
+	ExitCode        int
+	Stdout          string
+	Stderr          string
+	DurationMS      int64
+	PeakMemoryKB    int
+	TimedOut        bool
+	OOMKilled       bool
+	OutputExceeded  bool
+	TimeUnavailable bool
 }
