@@ -105,7 +105,15 @@ jobs:
           sudo tar -xjf gvisor.tar.bz2 -C /usr/local/bin
           sudo /usr/local/bin/runsc install
           sudo systemctl reload docker
-          docker run --rm --runtime=runsc --network=none --entrypoint=/bin/true judge-python-ci
+          for attempt in {1..15}; do
+            if docker info --format '{{json .Runtimes}}' | jq -e 'has("runsc")' > /dev/null; then
+              docker run --rm --runtime=runsc --network=none --entrypoint=/bin/true judge-python-ci
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Docker did not register the runsc runtime after reload"
+          exit 1
 
       - name: Test supervisor with gVisor
         timeout-minutes: 10
