@@ -48,9 +48,12 @@ func cppCodeOnly(source string) string {
 				end = i + 2 + offset + 2
 			}
 		case strings.HasPrefix(source[i:], `R"`):
-			if open := strings.IndexByte(source[i+2:], '('); open >= 0 && open <= 16 {
+			// A raw delimiter is at most 16 bytes. Never rescan the entire suffix
+			// for each malformed R" prefix in untrusted source.
+			if open := strings.IndexByte(source[i+2:min(i+19, len(source))], '('); open >= 0 {
 				delimiter := source[i+2 : i+2+open]
 				start := i + 3 + open
+				end = len(source)
 				if close := strings.Index(source[start:], ")"+delimiter+`"`); close >= 0 {
 					end = start + close + len(delimiter) + 2
 				}
