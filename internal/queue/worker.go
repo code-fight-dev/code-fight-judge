@@ -172,7 +172,6 @@ func (w *Worker) processOne(ctx context.Context) error {
 			Tests:      []callback.TestResult{},
 		})
 		if callbackErr != nil {
-			_ = w.repo.MarkFailed(ctx, job.ID, job.StartedAt)
 			return fmt.Errorf("send internal error callback: %w", callbackErr)
 		}
 
@@ -213,7 +212,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 		Tests:      toCallbackTests(result.TestResults),
 	})
 	if callbackErr != nil {
-		_ = w.repo.MarkFailed(ctx, job.ID, job.StartedAt)
+		// Leave the job running so lease recovery can retry after backend outages.
 		return fmt.Errorf("send callback: %w", callbackErr)
 	}
 

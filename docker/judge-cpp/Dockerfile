@@ -1,4 +1,4 @@
-FROM golang:1.24-alpine AS supervisor-builder
+FROM golang:1.27.3-alpine3.24 AS supervisor-builder
 WORKDIR /src
 COPY go.mod ./
 COPY internal/supervisor ./internal/supervisor

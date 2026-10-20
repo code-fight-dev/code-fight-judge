@@ -61,12 +61,16 @@ func buildGoFunctionHarness(sourceCode string) (string, error) {
 		return "", nil
 	}
 
-	prefix := "_cf"
+	// Count collisions before allocating: growing the prefix for each underscore
+	// makes a single attacker-controlled identifier cause quadratic allocations.
+	underscoreCount := 0
 	for name := range file.Scope.Objects {
-		for strings.HasPrefix(name, prefix) {
-			prefix += "_"
+		if suffix, ok := strings.CutPrefix(name, "_cf"); ok {
+			count := len(suffix) - len(strings.TrimLeft(suffix, "_"))
+			underscoreCount = max(underscoreCount, count+1)
 		}
 	}
+	prefix := "_cf" + strings.Repeat("_", underscoreCount)
 	harness := strings.ReplaceAll(goTypedFunctionMain, "_cf", prefix)
 	harness = strings.ReplaceAll(harness, "__ENTRY__", entry.Name.Name)
 	formatted, err := format.Source([]byte(harness))
