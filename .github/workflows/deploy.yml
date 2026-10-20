@@ -10,6 +10,9 @@ concurrency:
   group: codefight-judge-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   judge-checks:
     name: Judge checks
@@ -36,7 +39,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.24.x"
+          go-version: "1.27.3"
           cache: true
 
       - name: Download dependencies
@@ -62,8 +65,13 @@ jobs:
       - name: Go vet
         run: go vet ./...
 
+      - name: Check dependency vulnerabilities
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...
+
       - name: Run tests
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Build judge binary
         run: go build -o judge ./cmd/judge
@@ -83,12 +91,28 @@ jobs:
       - name: Docker build Node runtime
         run: docker build -f docker/judge-node/Dockerfile -t judge-node-ci .
 
-      - name: Test supervisor with real containers
+      - name: Install gVisor
+        env:
+          GVISOR_RELEASE: "20261012.0"
+        run: |
+          set -euo pipefail
+          workdir=$(mktemp -d)
+          cd "$workdir"
+          base="https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/x86_64"
+          curl -fsSLO "$base/gvisor.tar.bz2"
+          curl -fsSLO "$base/gvisor.tar.bz2.sha512"
+          sha512sum -c gvisor.tar.bz2.sha512
+          sudo tar -xjf gvisor.tar.bz2 -C /usr/local/bin
+          sudo /usr/local/bin/runsc install
+          sudo systemctl reload docker
+          docker run --rm --runtime=runsc --network=none --entrypoint=/bin/true judge-python-ci
+
+      - name: Test supervisor with gVisor
         timeout-minutes: 10
         env:
           JUDGE_SANDBOX_INTEGRATION: "1"
           JUDGE_COMPILE_TIMEOUT: 60s
-          JUDGE_INTEGRATION_RUNTIME: runc
+          JUDGE_INTEGRATION_RUNTIME: runsc
           JUDGE_INTEGRATION_GO_IMAGE: judge-go-ci
           JUDGE_INTEGRATION_PYTHON_IMAGE: judge-python-ci
           JUDGE_INTEGRATION_CPP_IMAGE: judge-cpp-ci
