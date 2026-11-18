@@ -217,7 +217,7 @@ func realSandboxIntegrationConfig(t *testing.T) (config.Config, *languages.Regis
 	runtimeName := getEnv("JUDGE_INTEGRATION_RUNTIME", "runsc")
 	requireDockerRuntime(t, ctx, runtimeName)
 
-	goImage := getEnv("JUDGE_INTEGRATION_GO_IMAGE", "judge-go:1.24")
+	goImage := getEnv("JUDGE_INTEGRATION_GO_IMAGE", "judge-go:1.27")
 	pythonImage := getEnv("JUDGE_INTEGRATION_PYTHON_IMAGE", "judge-python:3.12")
 	cppImage := getEnv("JUDGE_INTEGRATION_CPP_IMAGE", "judge-cpp:20")
 	nodeImage := getEnv("JUDGE_INTEGRATION_NODE_IMAGE", "judge-node:24")

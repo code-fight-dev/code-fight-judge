@@ -45,7 +45,7 @@ type SupportedLanguage struct {
 
 func NewDefaultRegistry(images RuntimeImages) *Registry {
 	if strings.TrimSpace(images.Go) == "" {
-		images.Go = "judge-go:1.24"
+		images.Go = "judge-go:1.27"
 	}
 	if strings.TrimSpace(images.Python) == "" {
 		images.Python = "judge-python:3.12"

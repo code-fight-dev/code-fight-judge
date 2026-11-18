@@ -288,7 +288,7 @@ func TestProcessOneMarksFailedWhenRunnerReturnsError(t *testing.T) {
 	}
 }
 
-func TestProcessOneMarksFailedWhenFinishedCallbackFails(t *testing.T) {
+func TestProcessOneLeavesJobRecoverableWhenFinishedCallbackFails(t *testing.T) {
 	job := testJob()
 	store := &fakeJobsStore{job: job}
 	runnerSvc := &fakeRunner{result: &runner.RunResult{
@@ -312,11 +312,24 @@ func TestProcessOneMarksFailedWhenFinishedCallbackFails(t *testing.T) {
 	if !strings.Contains(err.Error(), "send callback") {
 		t.Fatalf("processOne() error = %q, want send callback", err.Error())
 	}
-	if store.markFailedID != job.ID {
-		t.Fatalf("MarkFailed id = %q, want %q", store.markFailedID, job.ID)
+	if store.markFailedID != "" {
+		t.Fatalf("MarkFailed id = %q, want no terminal state before delivery", store.markFailedID)
 	}
 	if store.markFinishID != "" {
 		t.Fatalf("MarkFinished id = %q, want empty", store.markFinishID)
+	}
+}
+
+func TestProcessOneLeavesJobRecoverableWhenErrorCallbackFails(t *testing.T) {
+	store := &fakeJobsStore{job: testJob()}
+	worker := NewWorker(store, &fakeRunner{err: errors.New("sandbox failed")},
+		&fakeCallbackClient{errors: []error{nil, errors.New("backend unavailable")}},
+		nil, time.Second, 1, time.Second)
+	if err := worker.processOne(context.Background()); err == nil || !strings.Contains(err.Error(), "send internal error callback") {
+		t.Fatalf("processOne() error = %v, want delivery failure", err)
+	}
+	if store.markFailedID != "" || store.markFinishID != "" {
+		t.Fatal("undelivered system error must remain recoverable through lease expiry")
 	}
 }
 

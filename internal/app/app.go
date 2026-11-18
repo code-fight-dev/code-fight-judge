@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"code-fight-judge/internal/callback"
@@ -70,7 +72,7 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	})
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg, judgeMetrics)
 	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
-	readiness := readinessChecker{
+	readiness := &readinessChecker{
 		db:            db,
 		images:        []string{cfg.JudgeGoImage, cfg.JudgePythonImage, cfg.JudgeCPPImage, cfg.JudgeNodeImage},
 		checkDocker:   checkDockerVersion,
@@ -110,13 +112,31 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 }
 
 type readinessChecker struct {
+	mu            sync.Mutex
+	checks        map[string]string
+	checkedAt     time.Time
 	db            dbPinger
 	images        []string
 	checkDocker   func(ctx context.Context) error
 	inspectDocker func(ctx context.Context, image string) error
 }
 
-func (c readinessChecker) CheckReady(ctx context.Context) map[string]string {
+func (c *readinessChecker) CheckReady(ctx context.Context) map[string]string {
+	// Share one bounded probe across requests, including failed probes.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.checks != nil && time.Since(c.checkedAt) < 5*time.Second {
+		return maps.Clone(c.checks)
+	}
+	// Client disconnects must not invalidate the cache and trigger another probe.
+	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	checks := c.check(probeCtx)
+	c.checks, c.checkedAt = checks, time.Now()
+	return maps.Clone(checks)
+}
+
+func (c *readinessChecker) check(ctx context.Context) map[string]string {
 	checks := map[string]string{
 		"db":     "ok",
 		"docker": "ok",

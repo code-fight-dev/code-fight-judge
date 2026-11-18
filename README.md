@@ -22,12 +22,14 @@ Docker with gVisor (`runsc`) for execution, and Prometheus for metrics.
 Worker leases and heartbeats allow interrupted jobs to be reclaimed. Callbacks
 can be repeated during recovery; consumers must handle them idempotently and
 reject older attempts using `started_at`.
+If final callback delivery fails, the job stays recoverable and is executed
+again after its lease expires. It becomes terminal only after delivery succeeds.
 
 ## Supported languages
 
 | Language | API identifier | API version | Runtime image |
 | --- | --- | --- | --- |
-| Go | `go` | `1.24` | `judge-go:1.24` |
+| Go | `go` | `1.24` | `judge-go:1.27` |
 | Python | `python` | `3.12` | `judge-python:3.12` |
 | C++ | `cpp` | `20` | `judge-cpp:20` |
 | JavaScript | `javascript` | `node24` | `judge-node:24` |
@@ -37,6 +39,8 @@ The language registry is the source of truth for accepted language/version
 pairs. JavaScript and TypeScript share a Node.js 24 image. The C++ image includes
 nlohmann/json; the Node image includes TypeScript and Node type definitions.
 Submissions use the dependencies supplied by their runtime image.
+The Go API version remains `1.24` for backend compatibility; its runtime image
+uses the maintained Go 1.27 toolchain.
 
 ## Submission contract
 
@@ -91,17 +95,19 @@ The HTTP server listens on port `8081` by default.
 Request and job types are defined in [internal/jobs/models.go](internal/jobs/models.go).
 Callback payloads are defined in [internal/callback/client.go](internal/callback/client.go).
 The callback destination and credentials come from service configuration.
+Readiness probes share a cached result for five seconds, including failures,
+so concurrent requests cannot start an unbounded number of Docker checks.
 
 ## Local development
 
-Prerequisites: Go 1.24 or later, PostgreSQL, Docker, and the `runsc` runtime.
+Prerequisites: Go 1.27.3 or later, PostgreSQL, Docker, and the `runsc` runtime.
 The PostgreSQL database must contain the `judge_jobs` table; its schema is
 managed by the [backend migrations](https://github.com/code-fight-dev/code-fight-backend/tree/main/internal/database/migrations).
 
 Build runtime images from the repository root:
 
 ```sh
-docker build -f docker/judge-go/Dockerfile -t judge-go:1.24 .
+docker build -f docker/judge-go/Dockerfile -t judge-go:1.27 .
 docker build -f docker/judge-python/Dockerfile -t judge-python:3.12 .
 docker build -f docker/judge-cpp/Dockerfile -t judge-cpp:20 .
 docker build -f docker/judge-node/Dockerfile -t judge-node:24 .
@@ -178,7 +184,7 @@ Container tests use `runsc` by default; `JUDGE_INTEGRATION_RUNTIME` selects a
 different installed runtime. Local adapter fixtures are enabled with
 `JUDGE_LOCAL_RUNTIME_TESTS=1` and require g++, nlohmann/json headers, Node,
 TypeScript, and Node type definitions. CI builds all runtime images and checks
-adapters, sandbox limits and isolation under `runc`, and job recovery against
+adapters, sandbox limits and isolation under `runsc`, and job recovery against
 PostgreSQL.
 
 ## Repository layout

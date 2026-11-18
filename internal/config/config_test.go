@@ -61,7 +61,7 @@ func TestLoadUsesDefaultsWithExplicitCredentials(t *testing.T) {
 	if cfg.JudgeCallbackToken != "test-callback-token" {
 		t.Fatalf("JudgeCallbackToken = %q, want dev callback token", cfg.JudgeCallbackToken)
 	}
-	if cfg.JudgeGoImage != "judge-go:1.24" || cfg.JudgePythonImage != "judge-python:3.12" {
+	if cfg.JudgeGoImage != "judge-go:1.27" || cfg.JudgePythonImage != "judge-python:3.12" {
 		t.Fatalf("judge images = %q/%q, want defaults", cfg.JudgeGoImage, cfg.JudgePythonImage)
 	}
 	if cfg.JudgeCPPImage != "judge-cpp:20" || cfg.JudgeNodeImage != "judge-node:24" {

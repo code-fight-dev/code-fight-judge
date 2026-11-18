@@ -62,7 +62,7 @@ func Load() (Config, error) {
 		JudgeAPIToken:   strings.TrimSpace(os.Getenv("JUDGE_API_TOKEN")),
 
 		JudgeWorkDir:          getString("JUDGE_WORKDIR", "/tmp/code-fight/jobs"),
-		JudgeGoImage:          getString("JUDGE_GO_IMAGE", "judge-go:1.24"),
+		JudgeGoImage:          getString("JUDGE_GO_IMAGE", "judge-go:1.27"),
 		JudgePythonImage:      getString("JUDGE_PYTHON_IMAGE", "judge-python:3.12"),
 		JudgeCPPImage:         getString("JUDGE_CPP_IMAGE", "judge-cpp:20"),
 		JudgeNodeImage:        getString("JUDGE_NODE_IMAGE", "judge-node:24"),

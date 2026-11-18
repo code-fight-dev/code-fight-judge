@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,6 +54,43 @@ func TestReadinessCheckerReportsOK(t *testing.T) {
 		if got != "ok" {
 			t.Fatalf("check %s = %q, want ok", key, got)
 		}
+	}
+}
+
+func TestReadinessCheckerSharesAndExpiresFailedProbe(t *testing.T) {
+	var probes atomic.Int32
+	checker := &readinessChecker{
+		db: &fakeDB{},
+		checkDocker: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				t.Errorf("probe inherited canceled request: %v", err)
+			}
+			probes.Add(1)
+			return errors.New("docker down")
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var requests sync.WaitGroup
+	for range 32 {
+		requests.Go(func() {
+			checks := checker.CheckReady(ctx)
+			if checks["docker"] != "docker down" {
+				t.Errorf("docker check = %q", checks["docker"])
+			}
+			checks["docker"] = "caller mutation"
+		})
+	}
+	requests.Wait()
+	if got := probes.Load(); got != 1 {
+		t.Fatalf("probes = %d, want one shared failed probe", got)
+	}
+	checker.checkedAt = time.Now().Add(-6 * time.Second)
+	if checks := checker.CheckReady(context.Background()); checks["docker"] != "docker down" {
+		t.Fatalf("refreshed docker check = %q", checks["docker"])
+	}
+	if got := probes.Load(); got != 2 {
+		t.Fatalf("probes after expiry = %d, want 2", got)
 	}
 }
 

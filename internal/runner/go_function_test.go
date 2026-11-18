@@ -24,6 +24,18 @@ const pricingFunction = `func maxProfit(prices []int) int {
 	return best
 }`
 
+func TestGoHarnessPrefixAllocationsStayBounded(t *testing.T) {
+	source := "package main\nvar _cf" + strings.Repeat("_", 32000) + " = 0\nfunc Solve() int { return 1 }"
+	allocations := testing.AllocsPerRun(1, func() {
+		if _, err := buildGoFunctionHarness(source); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if allocations > 5000 {
+		t.Fatalf("harness allocations = %.0f; long identifiers must not grow the prefix one byte at a time", allocations)
+	}
+}
+
 // Compile and execute the generated files rather than only inspecting text.
 func TestGoFunctionPrograms(t *testing.T) {
 	cases := []struct {
