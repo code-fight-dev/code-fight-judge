@@ -132,7 +132,7 @@ jobs:
     name: Deploy judge
     runs-on: ubuntu-latest
     needs: judge-checks
-    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.DEPLOY_ENABLED == 'true'
 
     steps:
       - name: Deploy to VPS
