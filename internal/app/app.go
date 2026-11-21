@@ -65,6 +65,7 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	jobsRepo := storage.NewJobsRepo(db)
 	judgeMetrics := metrics.NewJudgeMetrics()
 	languageRegistry := languages.NewDefaultRegistry(languages.RuntimeImages{
+		C:      cfg.JudgeCImage,
 		Go:     cfg.JudgeGoImage,
 		Python: cfg.JudgePythonImage,
 		CPP:    cfg.JudgeCPPImage,
@@ -73,8 +74,14 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg, judgeMetrics)
 	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
 	readiness := &readinessChecker{
-		db:            db,
-		images:        []string{cfg.JudgeGoImage, cfg.JudgePythonImage, cfg.JudgeCPPImage, cfg.JudgeNodeImage},
+		db: db,
+		images: []string{
+			cfg.JudgeCImage,
+			cfg.JudgeGoImage,
+			cfg.JudgePythonImage,
+			cfg.JudgeCPPImage,
+			cfg.JudgeNodeImage,
+		},
 		checkDocker:   checkDockerVersion,
 		inspectDocker: inspectDockerImage,
 	}

@@ -107,6 +107,7 @@ managed by the [backend migrations](https://github.com/code-fight-dev/code-fight
 Build runtime images from the repository root:
 
 ```sh
+docker build -f docker/judge-c/Dockerfile -t judge-c:23 .
 docker build -f docker/judge-go/Dockerfile -t judge-go:1.27 .
 docker build -f docker/judge-python/Dockerfile -t judge-python:3.12 .
 docker build -f docker/judge-cpp/Dockerfile -t judge-cpp:20 .
@@ -130,7 +131,7 @@ go run ./cmd/judge
 | `JUDGE_API_TOKEN` | Authentication for backend requests |
 | `JUDGE_CALLBACK_URL`, `JUDGE_CALLBACK_TOKEN` | Backend callback endpoint and authentication |
 | `JUDGE_WORKDIR` | Directory for submission workspaces |
-| `JUDGE_GO_IMAGE`, `JUDGE_PYTHON_IMAGE`, `JUDGE_CPP_IMAGE`, `JUDGE_NODE_IMAGE` | Runtime image references |
+| `JUDGE_C_IMAGE`, `JUDGE_GO_IMAGE`, `JUDGE_PYTHON_IMAGE`, `JUDGE_CPP_IMAGE`, `JUDGE_NODE_IMAGE` | Runtime image references |
 | `JUDGE_RUNTIME` | Docker runtime; defaults to `runsc` |
 | `JUDGE_COMPILE_TIMEOUT` | Independent compiler wall-time limit; defaults to `60s` |
 | `JUDGE_CPU_COUNT`, `JUDGE_DEFAULT_PIDS`, `JUDGE_DEFAULT_TMPFS_MB` | Sandbox resource settings |

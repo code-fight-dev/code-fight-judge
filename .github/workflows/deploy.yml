@@ -88,6 +88,9 @@ jobs:
       - name: Docker build C++ runtime
         run: docker build -f docker/judge-cpp/Dockerfile -t judge-cpp-ci .
 
+      - name: Docker build C23 runtime
+        run: docker build -f docker/judge-c/Dockerfile -t judge-c-ci .
+
       - name: Docker build Node runtime
         run: docker build -f docker/judge-node/Dockerfile -t judge-node-ci .
 
@@ -126,6 +129,7 @@ jobs:
           JUDGE_INTEGRATION_CPP_IMAGE: judge-cpp-ci
           JUDGE_INTEGRATION_NODE_IMAGE: judge-node-ci
           JUDGE_TEST_DATABASE_URL: postgres://judge:judge-ci-password@localhost:5432/judge?sslmode=disable
+          JUDGE_INTEGRATION_C_IMAGE: judge-c-ci
         run: go test -count=1 -v -tags integration ./internal/runner ./internal/storage
 
   deploy:

@@ -29,6 +29,7 @@ type Config struct {
 	JudgeGoImage          string
 	JudgePythonImage      string
 	JudgeCPPImage         string
+	JudgeCImage           string
 	JudgeNodeImage        string
 	JudgeRuntime          string
 	JudgeCompileTimeout   time.Duration
@@ -67,6 +68,7 @@ func Load() (Config, error) {
 		JudgeCPPImage:         getString("JUDGE_CPP_IMAGE", "judge-cpp:20"),
 		JudgeNodeImage:        getString("JUDGE_NODE_IMAGE", "judge-node:24"),
 		JudgeRuntime:          getString("JUDGE_RUNTIME", "runsc"),
+		JudgeCImage:           getString("JUDGE_C_IMAGE", "judge-c:23"),
 		JudgeCompileTimeout:   getDuration("JUDGE_COMPILE_TIMEOUT", DefaultCompileTimeout),
 		JudgeCPUCount:         getFloat64("JUDGE_CPU_COUNT", 1),
 		JudgeDefaultMemoryMB:  getInt("JUDGE_DEFAULT_MEMORY_MB", 256),
@@ -116,6 +118,9 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.JudgeWorkDir) == "" {
 		return Config{}, fmt.Errorf("JUDGE_WORKDIR is required")
+	}
+	if strings.TrimSpace(cfg.JudgeCImage) == "" {
+		return Config{}, fmt.Errorf("JUDGE_C_IMAGE is required")
 	}
 	if strings.TrimSpace(cfg.JudgeGoImage) == "" {
 		return Config{}, fmt.Errorf("JUDGE_GO_IMAGE is required")
@@ -177,6 +182,9 @@ func Load() (Config, error) {
 		}
 		if !strings.Contains(cfg.JudgeNodeImage, "@sha256:") {
 			return Config{}, fmt.Errorf("JUDGE_NODE_IMAGE must be pinned by digest in prod")
+		}
+		if !strings.Contains(cfg.JudgeCImage, "@sha256:") {
+			return Config{}, fmt.Errorf("JUDGE_C_IMAGE must be pinned by digest in prod")
 		}
 	}
 

@@ -18,6 +18,7 @@ var configEnvKeys = []string{
 	"DATABASE_URL",
 	"JUDGE_API_TOKEN",
 	"JUDGE_WORKDIR",
+	"JUDGE_C_IMAGE",
 	"JUDGE_GO_IMAGE",
 	"JUDGE_PYTHON_IMAGE",
 	"JUDGE_CPP_IMAGE",
@@ -61,6 +62,9 @@ func TestLoadUsesDefaultsWithExplicitCredentials(t *testing.T) {
 	if cfg.JudgeCallbackToken != "test-callback-token" {
 		t.Fatalf("JudgeCallbackToken = %q, want dev callback token", cfg.JudgeCallbackToken)
 	}
+	if cfg.JudgeCImage != "judge-c:23" {
+		t.Fatalf("JudgeCImage = %q, want judge-c:23", cfg.JudgeCImage)
+	}
 	if cfg.JudgeGoImage != "judge-go:1.27" || cfg.JudgePythonImage != "judge-python:3.12" {
 		t.Fatalf("judge images = %q/%q, want defaults", cfg.JudgeGoImage, cfg.JudgePythonImage)
 	}
@@ -88,6 +92,7 @@ func TestLoadReadsConfiguredValues(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://judge:test@localhost:5432/judge")
 	t.Setenv("JUDGE_API_TOKEN", "judge-api-token")
 	t.Setenv("JUDGE_WORKDIR", "/workdir")
+	t.Setenv("JUDGE_C_IMAGE", "c-image:test")
 	t.Setenv("JUDGE_GO_IMAGE", "go-image:test")
 	t.Setenv("JUDGE_PYTHON_IMAGE", "python-image:test")
 	t.Setenv("JUDGE_RUNTIME", "runc")
@@ -123,6 +128,9 @@ func TestLoadReadsConfiguredValues(t *testing.T) {
 	}
 	if cfg.ShutdownTimeout != 5*time.Second || cfg.MaxBodyBytes != 2048 {
 		t.Fatalf("shutdown/max body = %s/%d, want 5s/2048", cfg.ShutdownTimeout, cfg.MaxBodyBytes)
+	}
+	if cfg.JudgeCImage != "c-image:test" {
+		t.Fatalf("JudgeCImage = %q, want c-image:test", cfg.JudgeCImage)
 	}
 	if cfg.JudgeCPUCount != 1.5 {
 		t.Fatalf("JudgeCPUCount = %v, want 1.5", cfg.JudgeCPUCount)
@@ -289,6 +297,7 @@ func TestLoadAcceptsProductionPinnedImages(t *testing.T) {
 	t.Setenv("JUDGE_API_TOKEN", "judge-api-token")
 	t.Setenv("JUDGE_CALLBACK_URL", "https://backend.example.test/callback")
 	t.Setenv("JUDGE_CALLBACK_TOKEN", "callback-token")
+	t.Setenv("JUDGE_C_IMAGE", "judge-c@sha256:abc")
 	t.Setenv("JUDGE_GO_IMAGE", "judge-go@sha256:abc")
 	t.Setenv("JUDGE_PYTHON_IMAGE", "judge-python@sha256:def")
 	t.Setenv("JUDGE_CPP_IMAGE", "judge-cpp@sha256:abc")
@@ -304,12 +313,12 @@ func TestLoadAcceptsProductionPinnedImages(t *testing.T) {
 }
 
 func TestLoadRequiresNewRuntimeImagePinsInProduction(t *testing.T) {
-	for _, key := range []string{"JUDGE_CPP_IMAGE", "JUDGE_NODE_IMAGE"} {
+	for _, key := range []string{"JUDGE_C_IMAGE", "JUDGE_CPP_IMAGE", "JUDGE_NODE_IMAGE"} {
 		t.Run(key, func(t *testing.T) {
 			clearConfigEnv(t)
 			t.Setenv("APP_ENV", "prod")
 			t.Setenv("DATABASE_URL", "postgres://judge:test@localhost:5432/judge")
-			for _, image := range []string{"JUDGE_GO_IMAGE", "JUDGE_PYTHON_IMAGE", "JUDGE_CPP_IMAGE", "JUDGE_NODE_IMAGE"} {
+			for _, image := range []string{"JUDGE_C_IMAGE", "JUDGE_GO_IMAGE", "JUDGE_PYTHON_IMAGE", "JUDGE_CPP_IMAGE", "JUDGE_NODE_IMAGE"} {
 				t.Setenv(image, "runtime@sha256:abc")
 			}
 			t.Setenv(key, "runtime:latest")

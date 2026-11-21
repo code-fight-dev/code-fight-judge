@@ -217,10 +217,12 @@ func realSandboxIntegrationConfig(t *testing.T) (config.Config, *languages.Regis
 	runtimeName := getEnv("JUDGE_INTEGRATION_RUNTIME", "runsc")
 	requireDockerRuntime(t, ctx, runtimeName)
 
+	cImage := getEnv("JUDGE_INTEGRATION_C_IMAGE", "judge-c:23")
 	goImage := getEnv("JUDGE_INTEGRATION_GO_IMAGE", "judge-go:1.27")
 	pythonImage := getEnv("JUDGE_INTEGRATION_PYTHON_IMAGE", "judge-python:3.12")
 	cppImage := getEnv("JUDGE_INTEGRATION_CPP_IMAGE", "judge-cpp:20")
 	nodeImage := getEnv("JUDGE_INTEGRATION_NODE_IMAGE", "judge-node:24")
+	requireDockerImage(t, ctx, cImage)
 	requireDockerImage(t, ctx, goImage)
 	requireDockerImage(t, ctx, pythonImage)
 	requireDockerImage(t, ctx, cppImage)
@@ -245,6 +247,7 @@ func realSandboxIntegrationConfig(t *testing.T) (config.Config, *languages.Regis
 		JudgeMaxOutputDirMB:  128,
 	}
 	registry := languages.NewDefaultRegistry(languages.RuntimeImages{
+		C:      cImage,
 		Go:     goImage,
 		Python: pythonImage,
 		CPP:    cppImage,
