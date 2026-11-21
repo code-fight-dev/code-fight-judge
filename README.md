@@ -100,7 +100,7 @@ so concurrent requests cannot start an unbounded number of Docker checks.
 
 ## Local development
 
-Prerequisites: Go 1.27.3 or later, PostgreSQL, Docker, and the `runsc` runtime.
+Prerequisites: Go 1.27.4 or later, PostgreSQL, Docker, and the `runsc` runtime.
 The PostgreSQL database must contain the `judge_jobs` table; its schema is
 managed by the [backend migrations](https://github.com/code-fight-dev/code-fight-backend/tree/main/internal/database/migrations).
 
