@@ -16,9 +16,12 @@ const (
 	JavaScriptVersion  = "node24"
 	TypeScriptLanguage = "typescript"
 	TypeScriptVersion  = "5.9.3"
+	CLanguage          = "c"
+	CVersion           = "23"
 )
 
 type RuntimeImages struct {
+	C      string
 	Go     string
 	Python string
 	CPP    string
@@ -56,6 +59,9 @@ func NewDefaultRegistry(images RuntimeImages) *Registry {
 	if strings.TrimSpace(images.Node) == "" {
 		images.Node = "judge-node:24"
 	}
+	if strings.TrimSpace(images.C) == "" {
+		images.C = "judge-c:23"
+	}
 
 	return NewRegistry([]Definition{
 		{
@@ -90,6 +96,25 @@ func NewDefaultRegistry(images RuntimeImages) *Registry {
 			Image:      images.Python,
 			SourceFile: "main.py",
 			RunCommand: []string{"python3", "-B", "/workspace/main.py"},
+		},
+		{
+			Language: CLanguage,
+			Version:  CVersion,
+			Image:    images.C,
+
+			SourceFile: "main.c",
+
+			CompileCommand: []string{
+				"gcc",
+				"-std=c23",
+				"-O2",
+				"-pipe",
+				"/workspace/main.c",
+				"-o",
+				"/output/program",
+			},
+
+			RunCommand: []string{"/output/program"},
 		},
 	})
 }

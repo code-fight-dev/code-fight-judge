@@ -264,3 +264,141 @@ func TestLocalNodePendingPromise(t *testing.T) {
 		t.Fatalf("pending promise exited before timeout: error=%v output=%s", err, output)
 	}
 }
+
+func TestRunnerIntegrationC23(t *testing.T) {
+	cfg, registry := realSandboxIntegrationConfig(t)
+	service := NewService(cfg, sandbox.NewRunscExecutor(), registry)
+
+	source := `
+#include <stdio.h>
+
+#if __STDC_VERSION__ != 202311L
+#error C23 standard is required
+#endif
+
+int main(void) {
+    int a, b;
+
+    if (scanf("%d %d", &a, &b) != 2) {
+        return 1;
+    }
+
+    printf("%d\n", a + b);
+    return 0;
+}
+`
+
+	result, err := service.Run(context.Background(), &jobs.Job{
+		ID:              "c23-integration",
+		Language:        languages.CLanguage,
+		LanguageVersion: languages.CVersion,
+		SourceCode:      source,
+		Limits: jobs.Limits{
+			TimeMS:   2000,
+			MemoryMB: 256,
+			OutputKB: 64,
+		},
+		Tests: []jobs.TestCase{
+			{ID: "one", Input: "3 5", ExpectedOutput: "8", Points: 1},
+			{ID: "two", Input: "6 7", ExpectedOutput: "13", Points: 2},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if result.Verdict != "accepted" ||
+		result.PassedTests != 2 ||
+		result.Score != 3 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestRunnerIntegrationC23Failures(t *testing.T) {
+	cfg, registry := realSandboxIntegrationConfig(t)
+	service := NewService(cfg, sandbox.NewRunscExecutor(), registry)
+
+	cases := []struct {
+		name    string
+		source  string
+		verdict string
+		timeMS  int
+	}{
+		{
+			name:    "compile_error",
+			source:  "#error intentional compilation failure",
+			verdict: "compile_error",
+			timeMS:  2000,
+		},
+		{
+			name:    "runtime_error",
+			source:  "int main(void) { return 42; }",
+			verdict: "runtime_error",
+			timeMS:  2000,
+		},
+		{
+			name: "time_limit_exceeded",
+			source: `
+int main(void) {
+    volatile unsigned long counter = 0;
+    while (1) {
+        counter++;
+    }
+}`,
+			verdict: "time_limit_exceeded",
+			timeMS:  200,
+		},
+		{
+			name: "output_limit_exceeded",
+			source: `
+#include <stdio.h>
+int main(void) {
+    while (1) {
+        puts("0123456789");
+    }
+}`,
+			verdict: "output_limit_exceeded",
+			timeMS:  2000,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := service.Run(
+				context.Background(),
+				&jobs.Job{
+					ID:              "c23-" + tc.name,
+					Language:        languages.CLanguage,
+					LanguageVersion: languages.CVersion,
+					SourceCode:      tc.source,
+					Limits: jobs.Limits{
+						TimeMS:   tc.timeMS,
+						MemoryMB: 256,
+						OutputKB: 1,
+					},
+					Tests: []jobs.TestCase{
+						{
+							ID:             "one",
+							Input:          "1",
+							ExpectedOutput: "1",
+							Points:         1,
+						},
+					},
+				},
+			)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if result.Verdict != tc.verdict {
+				t.Fatalf(
+					"verdict = %q, want %q; result = %+v",
+					result.Verdict,
+					tc.verdict,
+					result,
+				)
+			}
+		})
+	}
+}

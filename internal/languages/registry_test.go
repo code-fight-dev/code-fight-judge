@@ -59,11 +59,18 @@ func TestRegistrySupportedReturnsPublicLanguageList(t *testing.T) {
 	})
 
 	supported := registry.Supported()
-	want := []SupportedLanguage{{CPPLanguage, CPPVersion}, {GoLanguage, GoVersion}, {JavaScriptLanguage, JavaScriptVersion}, {PythonLanguage, PythonVersion}, {TypeScriptLanguage, TypeScriptVersion}}
+	want := []SupportedLanguage{
+		{CLanguage, CVersion},
+		{CPPLanguage, CPPVersion},
+		{GoLanguage, GoVersion},
+		{JavaScriptLanguage, JavaScriptVersion},
+		{PythonLanguage, PythonVersion},
+		{TypeScriptLanguage, TypeScriptVersion},
+	}
+
 	if !reflect.DeepEqual(supported, want) {
 		t.Fatalf("Supported() = %#v, want %#v", supported, want)
 	}
-
 }
 
 func TestRegistryIsSupported(t *testing.T) {
@@ -89,5 +96,28 @@ func TestNewRegistrySkipsEmptyDefinitions(t *testing.T) {
 
 	if len(registry.Supported()) != 1 {
 		t.Fatalf("Supported() len = %d, want 1", len(registry.Supported()))
+	}
+}
+
+func TestRegistrySupportsC23(t *testing.T) {
+	registry := NewDefaultRegistry(RuntimeImages{
+		C: "judge-c:test",
+	})
+
+	definition, ok := registry.Lookup("c", "23")
+	if !ok {
+		t.Fatal("C23 is not registered")
+	}
+
+	if definition.Image != "judge-c:test" {
+		t.Fatalf("unexpected image: %s", definition.Image)
+	}
+
+	if definition.SourceFile != "main.c" {
+		t.Fatalf("unexpected source file: %s", definition.SourceFile)
+	}
+
+	if len(definition.CompileCommand) == 0 {
+		t.Fatal("C23 compile command is missing")
 	}
 }
