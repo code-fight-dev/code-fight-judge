@@ -402,3 +402,153 @@ int main(void) {
 		})
 	}
 }
+
+func TestRunnerIntegrationC23Functions(t *testing.T) {
+	cfg, registry := realSandboxIntegrationConfig(t)
+	service := NewService(cfg, sandbox.NewRunscExecutor(), registry)
+
+	cases := []struct {
+		name        string
+		source      string
+		tests       []jobs.TestCase
+		wantVerdict string
+		wantPassed  int
+		wantScore   int
+	}{
+		{
+			name: "Solve",
+			source: `
+#include <stdio.h>
+
+const char *Solve(const char *input) {
+    static char result[64];
+    int a, b;
+
+    if (sscanf(input, "%d %d", &a, &b) != 2) {
+        return "invalid input";
+    }
+
+    snprintf(result, sizeof(result), "%d", a + b);
+    return result;
+}`,
+			tests: []jobs.TestCase{
+				{ID: "one", Input: "3 5", ExpectedOutput: "8", Points: 1},
+				{ID: "two", Input: "6 7", ExpectedOutput: "13", Points: 2},
+			},
+			wantVerdict: "accepted",
+			wantPassed:  2,
+			wantScore:   3,
+		},
+		{
+			name: "lowercase_solve",
+			source: `
+const char *solve(const char *input) {
+    return input;
+}`,
+			tests: []jobs.TestCase{
+				{ID: "one", Input: "hello", ExpectedOutput: "hello", Points: 1},
+			},
+			wantVerdict: "accepted",
+			wantPassed:  1,
+			wantScore:   1,
+		},
+		{
+			name: "commented_main",
+			source: `
+// int main(void) { return 0; }
+
+const char *Solve(const char *input) {
+    return input;
+}`,
+			tests: []jobs.TestCase{
+				{ID: "one", Input: "hello", ExpectedOutput: "hello", Points: 1},
+			},
+			wantVerdict: "accepted",
+			wantPassed:  1,
+			wantScore:   1,
+		},
+		{
+			name: "invalid_signature",
+			source: `
+int Solve(const char *input) {
+    (void)input;
+    return 42;
+}`,
+			tests: []jobs.TestCase{
+				{ID: "one", Input: "1", ExpectedOutput: "42", Points: 1},
+			},
+			wantVerdict: "compile_error",
+		},
+		{
+			name: "null_result",
+			source: `
+#include <stddef.h>
+
+const char *Solve(const char *input) {
+    (void)input;
+    return NULL;
+}`,
+			tests: []jobs.TestCase{
+				{ID: "one", Input: "1", ExpectedOutput: "1", Points: 1},
+			},
+			wantVerdict: "runtime_error",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := service.Run(
+				context.Background(),
+				&jobs.Job{
+					ID:              "c23-function-" + tc.name,
+					Language:        languages.CLanguage,
+					LanguageVersion: languages.CVersion,
+					SourceCode:      tc.source,
+					Limits: jobs.Limits{
+						TimeMS:   2000,
+						MemoryMB: 256,
+						OutputKB: 64,
+					},
+					Tests: tc.tests,
+				},
+			)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if result.Verdict != tc.wantVerdict {
+				t.Fatalf(
+					"verdict = %q, want %q; result = %+v",
+					result.Verdict,
+					tc.wantVerdict,
+					result,
+				)
+			}
+
+			if result.PassedTests != tc.wantPassed ||
+				result.Score != tc.wantScore {
+				t.Fatalf(
+					"passed = %d, score = %d; want %d, %d",
+					result.PassedTests,
+					result.Score,
+					tc.wantPassed,
+					tc.wantScore,
+				)
+			}
+
+			if tc.name == "invalid_signature" &&
+				result.CompileLog == "" {
+				t.Fatal("expected compiler diagnostics")
+			}
+
+			if tc.name == "null_result" &&
+				!strings.Contains(result.Stderr, "Solve returned NULL") {
+				t.Fatalf(
+					"expected NULL error, stderr = %q",
+					result.Stderr,
+				)
+			}
+		})
+	}
+}
