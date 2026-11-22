@@ -477,6 +477,9 @@ func writeSourceFiles(workspaceDir string, language languages.Definition, source
 	case languages.CPPLanguage:
 		return writeCPPSource(workspaceDir, sourceCode)
 
+	case languages.CLanguage:
+		return writeCSource(workspaceDir, sourceCode)
+
 	default:
 		mainFile := filepath.Join(workspaceDir, language.SourceFile)
 		return os.WriteFile(mainFile, []byte(sourceCode), 0644)
