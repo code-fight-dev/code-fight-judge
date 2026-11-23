@@ -86,3 +86,43 @@ const char *Solve(const char *input) {
 		t.Fatal("expected solution.c to be created:", err)
 	}
 }
+
+func TestWriteCSourceWithTypedFunction(t *testing.T) {
+	workspace := t.TempDir()
+
+	source := `int Solve(int a, int b) {
+		return a + b;
+	}`
+
+	if err := writeCSource(workspace, source); err != nil {
+		t.Fatal(err)
+	}
+
+	header, err := os.ReadFile(
+		filepath.Join(workspace, "c_typed.h"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(
+		string(header),
+		"cf_judge_run_int2",
+	) {
+		t.Fatal("typed function handler is missing")
+	}
+
+	main, err := os.ReadFile(
+		filepath.Join(workspace, "main.c"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !strings.Contains(
+		string(main),
+		`#include "c_typed.h"`,
+	) {
+		t.Fatal("typed function header is not included")
+	}
+}

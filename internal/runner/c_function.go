@@ -11,6 +11,9 @@ import (
 //go:embed harness/c_main.c
 var cFunctionMain string
 
+//go:embed harness/c_typed.h
+var cTypedHeader string
+
 var (
 	cMainPattern  = regexp.MustCompile(`\bmain\s*\(`)
 	cSolvePattern = regexp.MustCompile(`\bSolve\s*\(`)
@@ -40,6 +43,14 @@ func writeCSource(workspace, source string) error {
 	if !cSolvePattern.MatchString(code) &&
 		cLowerPattern.MatchString(code) {
 		entry = "solve"
+	}
+
+	if err := os.WriteFile(
+		filepath.Join(workspace, "c_typed.h"),
+		[]byte(cTypedHeader),
+		0644,
+	); err != nil {
+		return err
 	}
 
 	harness := strings.ReplaceAll(cFunctionMain, "__ENTRY__", entry)
