@@ -552,3 +552,132 @@ const char *Solve(const char *input) {
 		})
 	}
 }
+
+func TestRunnerIntegrationC23TypedFunctions(t *testing.T) {
+	cfg, registry := realSandboxIntegrationConfig(t)
+	service := NewService(cfg, sandbox.NewRunscExecutor(), registry)
+
+	cases := []struct {
+		name      string
+		source    string
+		input     string
+		output    string
+		verdict   string
+		errorText string
+	}{
+		{
+			name:    "one_integer",
+			source:  `int Solve(int value) { return value * 2; }`,
+			input:   "21",
+			output:  "42",
+			verdict: "accepted",
+		},
+		{
+			name:    "two_integers",
+			source:  `int Solve(int a, int b) { return a + b; }`,
+			input:   "3\n5",
+			output:  "8",
+			verdict: "accepted",
+		},
+		{
+			name:    "negative_integer",
+			source:  `int Solve(int value) { return value; }`,
+			input:   "-42",
+			output:  "-42",
+			verdict: "accepted",
+		},
+		{
+			name:    "legacy_string",
+			source:  `const char *solve(const char *input) { return input; }`,
+			input:   "hello",
+			output:  "hello",
+			verdict: "accepted",
+		},
+		{
+			name:      "out_of_range",
+			source:    `int Solve(int value) { return value; }`,
+			input:     "2147483648",
+			verdict:   "runtime_error",
+			errorText: "out-of-range integer",
+		},
+		{
+			name:      "extra_argument",
+			source:    `int Solve(int value) { return value; }`,
+			input:     "1\n2",
+			verdict:   "runtime_error",
+			errorText: "unexpected input",
+		},
+		{
+			name:      "invalid_integer",
+			source:    `int Solve(int a, int b) { return a + b; }`,
+			input:     "abc\n5",
+			verdict:   "runtime_error",
+			errorText: "invalid or out-of-range integer",
+		},
+		{
+			name:    "unsupported_signature",
+			source:  `double Solve(double value) { return value; }`,
+			input:   "3.5",
+			verdict: "compile_error",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := service.Run(
+				context.Background(),
+				&jobs.Job{
+					ID:              "c23-typed-" + tc.name,
+					Language:        languages.CLanguage,
+					LanguageVersion: languages.CVersion,
+					SourceCode:      tc.source,
+					Limits: jobs.Limits{
+						TimeMS:   2000,
+						MemoryMB: 256,
+						OutputKB: 64,
+					},
+					Tests: []jobs.TestCase{
+						{
+							ID:             "one",
+							Input:          tc.input,
+							ExpectedOutput: tc.output,
+							Points:         1,
+						},
+					},
+				},
+			)
+
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if result.Verdict != tc.verdict {
+				t.Fatalf(
+					"verdict = %q, want %q; result = %+v",
+					result.Verdict,
+					tc.verdict,
+					result,
+				)
+			}
+
+			if tc.verdict == "accepted" &&
+				(result.PassedTests != 1 || result.Score != 1) {
+				t.Fatalf("unexpected accepted result: %+v", result)
+			}
+
+			if tc.errorText != "" &&
+				!strings.Contains(result.Stderr, tc.errorText) {
+				t.Fatalf(
+					"stderr = %q, expected %q",
+					result.Stderr,
+					tc.errorText,
+				)
+			}
+
+			if tc.verdict == "compile_error" &&
+				result.CompileLog == "" {
+				t.Fatal("missing compiler diagnostics")
+			}
+		})
+	}
+}
