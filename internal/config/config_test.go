@@ -24,6 +24,7 @@ var configEnvKeys = []string{
 	"JUDGE_CPP_IMAGE",
 	"JUDGE_NODE_IMAGE",
 	"JUDGE_RUNTIME",
+	"JUDGE_WORKER_COUNT",
 	"JUDGE_COMPILE_TIMEOUT",
 	"JUDGE_CPU_COUNT",
 	"JUDGE_DEFAULT_MEMORY_MB",
@@ -77,6 +78,9 @@ func TestLoadUsesDefaultsWithExplicitCredentials(t *testing.T) {
 	if cfg.JudgeCompileTimeout != time.Minute {
 		t.Fatalf("JudgeCompileTimeout = %s, want 1m", cfg.JudgeCompileTimeout)
 	}
+	if cfg.JudgeWorkerCount != 1 {
+		t.Fatalf("JudgeWorkerCount = %d, want 1", cfg.JudgeWorkerCount)
+	}
 }
 
 func TestLoadReadsConfiguredValues(t *testing.T) {
@@ -96,6 +100,7 @@ func TestLoadReadsConfiguredValues(t *testing.T) {
 	t.Setenv("JUDGE_GO_IMAGE", "go-image:test")
 	t.Setenv("JUDGE_PYTHON_IMAGE", "python-image:test")
 	t.Setenv("JUDGE_RUNTIME", "runc")
+	t.Setenv("JUDGE_WORKER_COUNT", "3")
 	t.Setenv("JUDGE_COMPILE_TIMEOUT", "45s")
 	t.Setenv("JUDGE_CPU_COUNT", "1.5")
 	t.Setenv("JUDGE_DEFAULT_MEMORY_MB", "512")
@@ -138,6 +143,9 @@ func TestLoadReadsConfiguredValues(t *testing.T) {
 	if cfg.JudgeCompileTimeout != 45*time.Second {
 		t.Fatalf("JudgeCompileTimeout = %s, want 45s", cfg.JudgeCompileTimeout)
 	}
+	if cfg.JudgeWorkerCount != 3 {
+		t.Fatalf("JudgeWorkerCount = %d, want 3", cfg.JudgeWorkerCount)
+	}
 	if cfg.JudgeCallbackAttempts != 7 || cfg.JudgeCallbackBackoff != 750*time.Millisecond {
 		t.Fatalf("callback retry = %d/%s, want 7/750ms", cfg.JudgeCallbackAttempts, cfg.JudgeCallbackBackoff)
 	}
@@ -165,6 +173,18 @@ func TestLoadValidatesPositiveLimits(t *testing.T) {
 		value   string
 		wantErr string
 	}{
+		{
+			name:    "zero workers",
+			key:     "JUDGE_WORKER_COUNT",
+			value:   "0",
+			wantErr: "JUDGE_WORKER_COUNT must be a positive integer",
+		},
+		{
+			name:    "invalid number of workers",
+			key:     "JUDGE_WORKER_COUNT",
+			value:   "invalid",
+			wantErr: "JUDGE_WORKER_COUNT must be a positive integer",
+		},
 		{
 			name:    "zero compile timeout",
 			key:     "JUDGE_COMPILE_TIMEOUT",

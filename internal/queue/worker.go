@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"code-fight-judge/internal/callback"
@@ -22,6 +23,7 @@ type Worker struct {
 	callbackAttempts   int
 	callbackBackoff    time.Duration
 	leaseRenewInterval time.Duration
+	workerCount        int
 }
 
 type JobsStore interface {
@@ -55,6 +57,7 @@ func NewWorker(
 	pollInterval time.Duration,
 	callbackAttempts int,
 	callbackBackoff time.Duration,
+	workerCount int,
 ) *Worker {
 	if callbackAttempts <= 0 {
 		callbackAttempts = 1
@@ -73,17 +76,24 @@ func NewWorker(
 		callbackAttempts:   callbackAttempts,
 		callbackBackoff:    callbackBackoff,
 		leaseRenewInterval: jobs.LeaseDuration / 3,
+		workerCount:        max(1, workerCount),
 	}
 }
 
 func (w *Worker) Run(ctx context.Context) {
-	deliveryDone := make(chan struct{})
-	go func() {
-		defer close(deliveryDone)
+	var workers sync.WaitGroup
+	workers.Go(func() {
 		w.deliverResults(ctx)
-	}()
-	defer func() { <-deliveryDone }()
+	})
+	for range w.workerCount {
+		workers.Go(func() {
+			w.runJobs(ctx)
+		})
+	}
+	workers.Wait()
+}
 
+func (w *Worker) runJobs(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 

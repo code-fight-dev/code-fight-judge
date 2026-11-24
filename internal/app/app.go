@@ -96,6 +96,7 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 		2*time.Second,
 		cfg.JudgeCallbackAttempts,
 		cfg.JudgeCallbackBackoff,
+		cfg.JudgeWorkerCount,
 	)
 
 	server := &http.Server{

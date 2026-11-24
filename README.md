@@ -136,12 +136,23 @@ go run ./cmd/judge
 | `JUDGE_WORKDIR` | Directory for submission workspaces |
 | `JUDGE_C_IMAGE`, `JUDGE_GO_IMAGE`, `JUDGE_PYTHON_IMAGE`, `JUDGE_CPP_IMAGE`, `JUDGE_NODE_IMAGE` | Runtime image references |
 | `JUDGE_RUNTIME` | Docker runtime; defaults to `runsc` |
+| `JUDGE_WORKER_COUNT` | Maximum simultaneous executions per Judge instance; defaults to `1` |
 | `JUDGE_COMPILE_TIMEOUT` | Independent compiler wall-time limit; defaults to `60s` |
 | `JUDGE_CPU_COUNT`, `JUDGE_DEFAULT_PIDS`, `JUDGE_DEFAULT_TMPFS_MB` | Sandbox resource settings |
 | `JUDGE_MAX_*` | Upper bounds on submission limits and test payloads |
 
 See [.env.example](.env.example) for common settings and
 [internal/config/config.go](internal/config/config.go) for all defaults and validation.
+
+### Multiple local workers
+
+Set `JUDGE_WORKER_COUNT` in the Infra Compose environment to run multiple
+execution workers per Judge instance. To run two Judge instances on the local
+stack, use `docker compose up -d --scale judge=2` in `code-fight-infra`.
+Each instance uses the same PostgreSQL queue and delivers stored results
+independently of its execution workers. Two instances configured for one
+worker each can run two jobs at once. A surviving instance can reclaim an
+interrupted execution two minutes after its last lease renewal.
 
 ## Execution and resource accounting
 
