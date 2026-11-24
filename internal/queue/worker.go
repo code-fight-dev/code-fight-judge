@@ -16,6 +16,7 @@ type Worker struct {
 	repo               JobsStore
 	runner             Runner
 	callbackClient     CallbackClient
+	callbackTarget     callback.Target
 	metrics            Metrics
 	pollInterval       time.Duration
 	callbackAttempts   int
@@ -25,8 +26,9 @@ type Worker struct {
 
 type JobsStore interface {
 	ClaimNextQueued(ctx context.Context) (*jobs.Job, error)
-	MarkFinished(ctx context.Context, jobID string, startedAt *time.Time) error
-	MarkFailed(ctx context.Context, jobID string, startedAt *time.Time) error
+	SaveResult(ctx context.Context, status jobs.Status, payload callback.ResultRequest) error
+	ClaimResult(ctx context.Context, lease time.Duration) (*callback.Delivery, error)
+	FinishResultDelivery(ctx context.Context, jobID string, attempt int64, retryAfter *time.Duration) error
 	RenewLease(ctx context.Context, jobID string, startedAt *time.Time) error
 }
 
@@ -48,6 +50,7 @@ func NewWorker(
 	repo JobsStore,
 	runner Runner,
 	callbackClient CallbackClient,
+	callbackTarget callback.Target,
 	metrics Metrics,
 	pollInterval time.Duration,
 	callbackAttempts int,
@@ -64,6 +67,7 @@ func NewWorker(
 		repo:               repo,
 		runner:             runner,
 		callbackClient:     callbackClient,
+		callbackTarget:     callbackTarget,
 		metrics:            metrics,
 		pollInterval:       pollInterval,
 		callbackAttempts:   callbackAttempts,
@@ -73,6 +77,13 @@ func NewWorker(
 }
 
 func (w *Worker) Run(ctx context.Context) {
+	deliveryDone := make(chan struct{})
+	go func() {
+		defer close(deliveryDone)
+		w.deliverResults(ctx)
+	}()
+	defer func() { <-deliveryDone }()
+
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 
@@ -119,7 +130,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 		}()
 	}
 
-	if err := w.sendResultWithRetry(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
+	if err := w.sendResultWithRetry(ctx, callback.ResultRequest{
 		JudgeSubmissionID: job.ID,
 		SubmissionID:      job.SubmissionID,
 		JudgeStatus:       "running",
@@ -136,7 +147,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	// Fence a stale worker before it sends a final result to the backend.
+	// Fence a stale worker before it saves a final result.
 	if err := w.verifyLease(ctx, job); err != nil {
 		return fmt.Errorf("verify job lease: %w", err)
 	}
@@ -146,7 +157,7 @@ func (w *Worker) processOne(ctx context.Context) error {
 	if runErr != nil {
 		log.Printf("worker run failed job id=%s error=%v", job.ID, runErr)
 
-		callbackErr := w.sendResultWithRetry(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
+		return w.repo.SaveResult(ctx, jobs.StatusFailed, callback.ResultRequest{
 			JudgeSubmissionID: job.ID,
 			SubmissionID:      job.SubmissionID,
 			JudgeStatus:       "finished",
@@ -171,22 +182,13 @@ func (w *Worker) processOne(ctx context.Context) error {
 			FinishedAt: &finishedAt,
 			Tests:      []callback.TestResult{},
 		})
-		if callbackErr != nil {
-			return fmt.Errorf("send internal error callback: %w", callbackErr)
-		}
-
-		if err := w.repo.MarkFailed(ctx, job.ID, job.StartedAt); err != nil {
-			return fmt.Errorf("mark job failed: %w", err)
-		}
-
-		return nil
 	}
 	verdict = result.Verdict
 	if !result.CompileTimeUnavailable && !result.RunTimeUnavailable {
 		executionDuration = time.Duration(result.DurationMS) * time.Millisecond
 	}
 
-	callbackErr := w.sendResultWithRetry(ctx, job.CallbackURL, job.CallbackToken, callback.ResultRequest{
+	err = w.repo.SaveResult(ctx, jobs.StatusFinished, callback.ResultRequest{
 		JudgeSubmissionID: job.ID,
 		SubmissionID:      job.SubmissionID,
 		JudgeStatus:       "finished",
@@ -211,13 +213,8 @@ func (w *Worker) processOne(ctx context.Context) error {
 		FinishedAt: &finishedAt,
 		Tests:      toCallbackTests(result.TestResults),
 	})
-	if callbackErr != nil {
-		// Leave the job running so lease recovery can retry after backend outages.
-		return fmt.Errorf("send callback: %w", callbackErr)
-	}
-
-	if err := w.repo.MarkFinished(ctx, job.ID, job.StartedAt); err != nil {
-		return fmt.Errorf("mark job finished: %w", err)
+	if err != nil {
+		return err
 	}
 	status = "finished"
 
@@ -265,17 +262,12 @@ func (w *Worker) keepLease(ctx context.Context, cancel context.CancelFunc, job *
 
 func (w *Worker) sendResultWithRetry(
 	ctx context.Context,
-	callbackURL string,
-	callbackToken string,
 	payload callback.ResultRequest,
 ) error {
 	var lastErr error
 
 	for attempt := 1; attempt <= w.callbackAttempts; attempt++ {
-		if err := w.callbackClient.SendResult(ctx, callbackURL, callbackToken, payload); err != nil {
-			if w.metrics != nil {
-				w.metrics.RecordCallbackAttempt("error")
-			}
+		if err := w.sendCallback(ctx, payload); err != nil {
 			lastErr = err
 			log.Printf(
 				"callback attempt failed job_id=%s submission_id=%s attempt=%d/%d err=%v",
@@ -286,9 +278,6 @@ func (w *Worker) sendResultWithRetry(
 				err,
 			)
 		} else {
-			if w.metrics != nil {
-				w.metrics.RecordCallbackAttempt("success")
-			}
 			return nil
 		}
 

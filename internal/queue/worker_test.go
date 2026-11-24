@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -13,13 +14,14 @@ import (
 )
 
 type fakeJobsStore struct {
-	job          *jobs.Job
-	claimErr     error
-	markFinishID string
-	markFailedID string
-	markErr      error
-	renewErr     error
-	renewErrors  []error
+	job         *jobs.Job
+	claimErr    error
+	result      *callback.Delivery
+	saved       jobs.Status
+	attempts    int64
+	retryAfter  *time.Duration
+	renewErr    error
+	renewErrors []error
 }
 
 func (s *fakeJobsStore) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
@@ -32,14 +34,26 @@ func (s *fakeJobsStore) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) 
 	return job, nil
 }
 
-func (s *fakeJobsStore) MarkFinished(ctx context.Context, jobID string, startedAt *time.Time) error {
-	s.markFinishID = jobID
-	return s.markErr
+func (s *fakeJobsStore) SaveResult(_ context.Context, status jobs.Status, payload callback.ResultRequest) error {
+	s.saved = status
+	s.result = &callback.Delivery{Payload: payload}
+	return nil
 }
 
-func (s *fakeJobsStore) MarkFailed(ctx context.Context, jobID string, startedAt *time.Time) error {
-	s.markFailedID = jobID
-	return s.markErr
+func (s *fakeJobsStore) ClaimResult(_ context.Context, _ time.Duration) (*callback.Delivery, error) {
+	if s.result != nil {
+		s.attempts++
+		s.result.Attempt = s.attempts
+	}
+	return s.result, nil
+}
+
+func (s *fakeJobsStore) FinishResultDelivery(_ context.Context, _ string, _ int64, retryAfter *time.Duration) error {
+	s.retryAfter = retryAfter
+	if retryAfter == nil {
+		s.result = nil
+	}
+	return nil
 }
 
 func (s *fakeJobsStore) RenewLease(ctx context.Context, jobID string, startedAt *time.Time) error {
@@ -101,6 +115,12 @@ type fakeMetrics struct {
 	callbackStatuses []string
 }
 
+var testCallbackTarget = callback.Target{URL: "https://backend.example.test/callback", Token: "callback-token"}
+
+func newTestWorker(store JobsStore, runner Runner, client CallbackClient, metrics Metrics, poll time.Duration, attempts int, backoff time.Duration) *Worker {
+	return NewWorker(store, runner, client, testCallbackTarget, metrics, poll, attempts, backoff)
+}
+
 func (m *fakeMetrics) RecordJobStarted() {
 	m.started++
 }
@@ -119,7 +139,7 @@ func TestProcessOneReturnsWhenNoQueuedJob(t *testing.T) {
 	store := &fakeJobsStore{}
 	runnerSvc := &fakeRunner{}
 	callbackClient := &fakeCallbackClient{}
-	worker := NewWorker(store, runnerSvc, callbackClient, nil, time.Second, 1, time.Second)
+	worker := newTestWorker(store, runnerSvc, callbackClient, nil, time.Second, 1, time.Second)
 
 	err := worker.processOne(context.Background())
 	if err != nil {
@@ -134,7 +154,7 @@ func TestProcessOneReturnsWhenNoQueuedJob(t *testing.T) {
 }
 
 func TestNewWorkerUsesDefaultRetrySettings(t *testing.T) {
-	worker := NewWorker(&fakeJobsStore{}, &fakeRunner{}, &fakeCallbackClient{}, nil, time.Second, 0, 0)
+	worker := newTestWorker(&fakeJobsStore{}, &fakeRunner{}, &fakeCallbackClient{}, nil, time.Second, 0, 0)
 
 	if worker.callbackAttempts != 1 {
 		t.Fatalf("callbackAttempts = %d, want 1", worker.callbackAttempts)
@@ -145,7 +165,7 @@ func TestNewWorkerUsesDefaultRetrySettings(t *testing.T) {
 }
 
 func TestRunReturnsWhenContextIsCanceled(t *testing.T) {
-	worker := NewWorker(&fakeJobsStore{}, &fakeRunner{}, &fakeCallbackClient{}, nil, time.Hour, 1, time.Second)
+	worker := newTestWorker(&fakeJobsStore{}, &fakeRunner{}, &fakeCallbackClient{}, nil, time.Hour, 1, time.Second)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -162,7 +182,7 @@ func TestRunReturnsWhenContextIsCanceled(t *testing.T) {
 	}
 }
 
-func TestProcessOneRunsJobSendsCallbacksAndMarksFinished(t *testing.T) {
+func TestProcessOneRunsJobAndPersistsFinalResult(t *testing.T) {
 	job := testJob()
 	store := &fakeJobsStore{job: job}
 	runnerSvc := &fakeRunner{result: &runner.RunResult{
@@ -189,7 +209,7 @@ func TestProcessOneRunsJobSendsCallbacksAndMarksFinished(t *testing.T) {
 	}}
 	callbackClient := &fakeCallbackClient{}
 	metrics := &fakeMetrics{}
-	worker := NewWorker(store, runnerSvc, callbackClient, metrics, time.Second, 1, time.Second)
+	worker := newTestWorker(store, runnerSvc, callbackClient, metrics, time.Second, 1, time.Second)
 
 	err := worker.processOne(context.Background())
 	if err != nil {
@@ -199,25 +219,22 @@ func TestProcessOneRunsJobSendsCallbacksAndMarksFinished(t *testing.T) {
 	if len(runnerSvc.jobs) != 1 || runnerSvc.jobs[0] != job {
 		t.Fatalf("runner jobs = %#v, want original job", runnerSvc.jobs)
 	}
-	if store.markFinishID != job.ID {
-		t.Fatalf("MarkFinished id = %q, want %q", store.markFinishID, job.ID)
+	if store.saved != jobs.StatusFinished || store.result == nil || store.result.Payload.JudgeSubmissionID != job.ID {
+		t.Fatalf("saved status=%s result=%#v", store.saved, store.result)
 	}
-	if store.markFailedID != "" {
-		t.Fatalf("MarkFailed id = %q, want empty", store.markFailedID)
-	}
-	if len(callbackClient.calls) != 2 {
-		t.Fatalf("callback calls = %d, want running + finished", len(callbackClient.calls))
+	if len(callbackClient.calls) != 1 {
+		t.Fatalf("callback calls = %d, want one progress update", len(callbackClient.calls))
 	}
 
 	running := callbackClient.calls[0]
 	if running.payload.JudgeStatus != "running" {
 		t.Fatalf("running callback status = %q, want running", running.payload.JudgeStatus)
 	}
-	if running.url != job.CallbackURL || running.token != job.CallbackToken {
-		t.Fatalf("running callback target = %q/%q, want job callback target", running.url, running.token)
+	if running.url != testCallbackTarget.URL || running.token != testCallbackTarget.Token {
+		t.Fatal("running callback did not use the configured target")
 	}
 
-	finished := callbackClient.calls[1].payload
+	finished := store.result.Payload
 	if finished.JudgeStatus != "finished" {
 		t.Fatalf("finished callback status = %q, want finished", finished.JudgeStatus)
 	}
@@ -253,24 +270,21 @@ func TestProcessOneMarksFailedWhenRunnerReturnsError(t *testing.T) {
 	runnerSvc := &fakeRunner{err: errors.New("sandbox failed")}
 	callbackClient := &fakeCallbackClient{}
 	metrics := &fakeMetrics{}
-	worker := NewWorker(store, runnerSvc, callbackClient, metrics, time.Second, 1, time.Second)
+	worker := newTestWorker(store, runnerSvc, callbackClient, metrics, time.Second, 1, time.Second)
 
 	err := worker.processOne(context.Background())
 	if err != nil {
 		t.Fatalf("processOne() error = %v", err)
 	}
 
-	if store.markFailedID != job.ID {
-		t.Fatalf("MarkFailed id = %q, want %q", store.markFailedID, job.ID)
+	if store.saved != jobs.StatusFailed || store.result == nil || store.result.Payload.JudgeSubmissionID != job.ID {
+		t.Fatalf("saved status=%s result=%#v", store.saved, store.result)
 	}
-	if store.markFinishID != "" {
-		t.Fatalf("MarkFinished id = %q, want empty", store.markFinishID)
-	}
-	if len(callbackClient.calls) != 2 {
-		t.Fatalf("callback calls = %d, want running + finished", len(callbackClient.calls))
+	if len(callbackClient.calls) != 1 {
+		t.Fatalf("callback calls = %d, want one progress update", len(callbackClient.calls))
 	}
 
-	finished := callbackClient.calls[1].payload
+	finished := store.result.Payload
 	if finished.Verdict == nil || *finished.Verdict != "system_error" {
 		t.Fatalf("finished verdict = %#v, want system_error", finished.Verdict)
 	}
@@ -288,7 +302,7 @@ func TestProcessOneMarksFailedWhenRunnerReturnsError(t *testing.T) {
 	}
 }
 
-func TestProcessOneLeavesJobRecoverableWhenFinishedCallbackFails(t *testing.T) {
+func TestResultDeliveryRetriesStoredVerdictWithoutRunningJobAgain(t *testing.T) {
 	job := testJob()
 	store := &fakeJobsStore{job: job}
 	runnerSvc := &fakeRunner{result: &runner.RunResult{
@@ -297,39 +311,28 @@ func TestProcessOneLeavesJobRecoverableWhenFinishedCallbackFails(t *testing.T) {
 		TotalTests:  1,
 		Score:       100,
 	}}
-	callbackClient := &fakeCallbackClient{
-		errors: []error{
-			nil,
-			errors.New("callback failed"),
-		},
+	callbackErr := errors.New("backend unavailable")
+	callbackClient := &fakeCallbackClient{errors: []error{nil, callbackErr}}
+	worker := newTestWorker(store, runnerSvc, callbackClient, nil, time.Second, 1, time.Second)
+	ctx := context.Background()
+	if err := worker.processOne(ctx); err != nil {
+		t.Fatal(err)
 	}
-	worker := NewWorker(store, runnerSvc, callbackClient, nil, time.Second, 1, time.Second)
-
-	err := worker.processOne(context.Background())
-	if err == nil {
-		t.Fatal("processOne() error = nil, want callback error")
+	if processed, err := worker.deliverNextResult(ctx); !processed || !errors.Is(err, callbackErr) {
+		t.Fatalf("failed delivery = %t, %v", processed, err)
 	}
-	if !strings.Contains(err.Error(), "send callback") {
-		t.Fatalf("processOne() error = %q, want send callback", err.Error())
+	if store.retryAfter == nil || *store.retryAfter != time.Second || store.result == nil {
+		t.Fatalf("result did not remain pending for retry")
 	}
-	if store.markFailedID != "" {
-		t.Fatalf("MarkFailed id = %q, want no terminal state before delivery", store.markFailedID)
+	restarted := newTestWorker(store, runnerSvc, callbackClient, nil, time.Second, 1, time.Second)
+	if processed, err := restarted.deliverNextResult(ctx); !processed || err != nil {
+		t.Fatalf("retried delivery = %t, %v", processed, err)
 	}
-	if store.markFinishID != "" {
-		t.Fatalf("MarkFinished id = %q, want empty", store.markFinishID)
+	if store.result != nil || len(runnerSvc.jobs) != 1 || len(callbackClient.calls) != 3 {
+		t.Fatal("delivery replay should acknowledge one result from one execution")
 	}
-}
-
-func TestProcessOneLeavesJobRecoverableWhenErrorCallbackFails(t *testing.T) {
-	store := &fakeJobsStore{job: testJob()}
-	worker := NewWorker(store, &fakeRunner{err: errors.New("sandbox failed")},
-		&fakeCallbackClient{errors: []error{nil, errors.New("backend unavailable")}},
-		nil, time.Second, 1, time.Second)
-	if err := worker.processOne(context.Background()); err == nil || !strings.Contains(err.Error(), "send internal error callback") {
-		t.Fatalf("processOne() error = %v, want delivery failure", err)
-	}
-	if store.markFailedID != "" || store.markFinishID != "" {
-		t.Fatal("undelivered system error must remain recoverable through lease expiry")
+	if !reflect.DeepEqual(callbackClient.calls[1], callbackClient.calls[2]) {
+		t.Fatal("retried callback differs from the first result")
 	}
 }
 
@@ -341,9 +344,9 @@ func TestSendResultWithRetryRetriesUntilSuccess(t *testing.T) {
 		},
 	}
 	metrics := &fakeMetrics{}
-	worker := NewWorker(&fakeJobsStore{}, &fakeRunner{}, callbackClient, metrics, time.Second, 3, time.Nanosecond)
+	worker := newTestWorker(&fakeJobsStore{}, &fakeRunner{}, callbackClient, metrics, time.Second, 3, time.Nanosecond)
 
-	err := worker.sendResultWithRetry(context.Background(), "https://backend.example.test/callback", "token", callback.ResultRequest{
+	err := worker.sendResultWithRetry(context.Background(), callback.ResultRequest{
 		JudgeSubmissionID: "job-1",
 		SubmissionID:      "submission-1",
 	})
@@ -365,11 +368,11 @@ func TestSendResultWithRetryReturnsContextErrorDuringBackoff(t *testing.T) {
 			errors.New("second failed"),
 		},
 	}
-	worker := NewWorker(&fakeJobsStore{}, &fakeRunner{}, callbackClient, nil, time.Second, 2, time.Hour)
+	worker := newTestWorker(&fakeJobsStore{}, &fakeRunner{}, callbackClient, nil, time.Second, 2, time.Hour)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := worker.sendResultWithRetry(ctx, "https://backend.example.test/callback", "token", callback.ResultRequest{
+	err := worker.sendResultWithRetry(ctx, callback.ResultRequest{
 		JudgeSubmissionID: "job-1",
 		SubmissionID:      "submission-1",
 	})
@@ -462,11 +465,11 @@ func TestWorkerDoesNotPublishResultAfterLosingLease(t *testing.T) {
 	store := &fakeJobsStore{job: testJob(), renewErrors: []error{nil, jobs.ErrLeaseLost}}
 	run := &fakeRunner{result: &runner.RunResult{Verdict: "accepted"}}
 	callbacks := &fakeCallbackClient{}
-	worker := NewWorker(store, run, callbacks, nil, time.Second, 1, time.Millisecond)
+	worker := newTestWorker(store, run, callbacks, nil, time.Second, 1, time.Millisecond)
 	if err := worker.processOne(context.Background()); !errors.Is(err, jobs.ErrLeaseLost) {
 		t.Fatalf("error=%v", err)
 	}
-	if len(callbacks.calls) != 1 || callbacks.calls[0].payload.JudgeStatus != "running" || store.markFinishID != "" || store.markFailedID != "" {
+	if len(callbacks.calls) != 1 || callbacks.calls[0].payload.JudgeStatus != "running" || store.result != nil {
 		t.Fatalf("stale result published: %#v", callbacks.calls)
 	}
 }
@@ -481,14 +484,14 @@ func (untilCanceledRunner) Run(ctx context.Context, job *jobs.Job) (*runner.RunR
 func TestLeaseRenewalFailureCancelsRunningJob(t *testing.T) {
 	store := &fakeJobsStore{job: testJob(), renewErrors: []error{nil, jobs.ErrLeaseLost}}
 	callbacks := &fakeCallbackClient{}
-	worker := NewWorker(store, untilCanceledRunner{}, callbacks, nil, time.Second, 1, time.Millisecond)
+	worker := newTestWorker(store, untilCanceledRunner{}, callbacks, nil, time.Second, 1, time.Millisecond)
 	worker.leaseRenewInterval = time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := worker.processOne(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("error=%v", err)
 	}
-	if len(callbacks.calls) != 1 || store.markFailedID != "" || store.markFinishID != "" {
+	if len(callbacks.calls) != 1 || store.result != nil {
 		t.Fatal("canceled claim was completed or published")
 	}
 }

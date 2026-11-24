@@ -118,7 +118,9 @@ func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
 		WITH picked AS (
 			SELECT id
 			FROM judge_jobs
-			WHERE status = $1 OR (status = $2 AND updated_at < clock_timestamp() - ($3 * interval '1 second'))
+			WHERE result_payload IS NULL AND (
+				status = $1 OR (status = $2 AND updated_at < clock_timestamp() - ($3 * interval '1 second'))
+			)
 			ORDER BY created_at ASC
 			LIMIT 1
 			FOR UPDATE SKIP LOCKED
@@ -190,35 +192,6 @@ func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
 	}
 
 	return &job, nil
-}
-
-func (r *JobsRepo) MarkFinished(ctx context.Context, jobID string, startedAt *time.Time) error {
-	if err := r.markTerminal(ctx, jobID, startedAt, jobs.StatusFinished); err != nil {
-		return fmt.Errorf("mark job finished: %w", err)
-	}
-	return nil
-}
-
-func (r *JobsRepo) MarkFailed(ctx context.Context, jobID string, startedAt *time.Time) error {
-	if err := r.markTerminal(ctx, jobID, startedAt, jobs.StatusFailed); err != nil {
-		return fmt.Errorf("mark job failed: %w", err)
-	}
-	return nil
-}
-
-func (r *JobsRepo) markTerminal(ctx context.Context, jobID string, startedAt *time.Time, status jobs.Status) error {
-	if startedAt == nil {
-		return jobs.ErrLeaseLost
-	}
-	tag, err := r.pool.Exec(ctx, `UPDATE judge_jobs SET status=$2, finished_at=clock_timestamp(), updated_at=clock_timestamp()
-		WHERE id=$1 AND started_at=$3 AND status=$4`, jobID, status, startedAt, jobs.StatusRunning)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() != 1 {
-		return jobs.ErrLeaseLost
-	}
-	return nil
 }
 
 func (r *JobsRepo) RenewLease(ctx context.Context, jobID string, startedAt *time.Time) error {

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"code-fight-judge/internal/callback"
 	"code-fight-judge/internal/jobs"
 
 	"github.com/jackc/pgx/v5"
@@ -297,80 +298,37 @@ func TestJobsRepoClaimNextQueuedWrapsInvalidTestsJSON(t *testing.T) {
 	}
 }
 
-func TestJobsRepoMarkFinishedAndFailed(t *testing.T) {
-	tests := []struct {
-		name       string
-		mark       func(*JobsRepo, context.Context, string, *time.Time) error
-		wantStatus jobs.Status
-		wantSQL    string
-	}{
-		{
-			name:       "finished",
-			mark:       (*JobsRepo).MarkFinished,
-			wantStatus: jobs.StatusFinished,
-			wantSQL:    "UPDATE judge_jobs",
-		},
-		{
-			name:       "failed",
-			mark:       (*JobsRepo).MarkFailed,
-			wantStatus: jobs.StatusFailed,
-			wantSQL:    "UPDATE judge_jobs",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+func TestJobsRepoSaveTerminalResult(t *testing.T) {
+	for _, status := range []jobs.Status{jobs.StatusFinished, jobs.StatusFailed} {
+		t.Run(string(status), func(t *testing.T) {
 			db := &fakeJobsDB{}
 			repo := &JobsRepo{pool: db}
-
-			err := tt.mark(repo, context.Background(), "job-1", timePtr(time.Now()))
+			now := time.Now()
+			err := repo.SaveResult(context.Background(), status, callback.ResultRequest{
+				JudgeSubmissionID: "job-1", StartedAt: &now, FinishedAt: &now,
+			})
 			if err != nil {
-				t.Fatalf("mark() error = %v", err)
+				t.Fatalf("SaveResult() error = %v", err)
 			}
 			if len(db.execs) != 1 {
 				t.Fatalf("Exec calls = %d, want 1", len(db.execs))
 			}
-			if !strings.Contains(db.execs[0].sql, tt.wantSQL) {
-				t.Fatalf("Exec SQL = %q, want %q", db.execs[0].sql, tt.wantSQL)
+			if !strings.Contains(db.execs[0].sql, "result_payload") || !strings.Contains(db.execs[0].sql, "callback_next_attempt_at") {
+				t.Fatalf("Exec SQL did not save and schedule the result: %q", db.execs[0].sql)
 			}
-			if db.execs[0].args[0] != "job-1" || db.execs[0].args[1] != tt.wantStatus {
-				t.Fatalf("Exec args = %#v, want job-1/%s", db.execs[0].args[:2], tt.wantStatus)
+			if db.execs[0].args[0] != "job-1" || db.execs[0].args[1] != status {
+				t.Fatalf("Exec args = %#v, want job-1/%s", db.execs[0].args[:2], status)
 			}
 		})
 	}
 }
 
-func TestJobsRepoMarkErrors(t *testing.T) {
-	tests := []struct {
-		name    string
-		mark    func(*JobsRepo, context.Context, string, *time.Time) error
-		wantErr string
-	}{
-		{
-			name:    "finished",
-			mark:    (*JobsRepo).MarkFinished,
-			wantErr: "mark job finished",
-		},
-		{
-			name:    "failed",
-			mark:    (*JobsRepo).MarkFailed,
-			wantErr: "mark job failed",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			db := &fakeJobsDB{execErr: errors.New("update failed")}
-			repo := &JobsRepo{pool: db}
-
-			err := tt.mark(repo, context.Background(), "job-1", timePtr(time.Now()))
-			if err == nil {
-				t.Fatalf("mark() error = nil, want %q", tt.wantErr)
-			}
-			if !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("mark() error = %q, want %q", err.Error(), tt.wantErr)
-			}
-		})
+func TestJobsRepoSaveResultWrapsUpdateError(t *testing.T) {
+	failure := errors.New("update failed")
+	repo := &JobsRepo{pool: &fakeJobsDB{execErr: failure}}
+	err := repo.SaveResult(context.Background(), jobs.StatusFinished, callback.ResultRequest{StartedAt: timePtr(time.Now())})
+	if !errors.Is(err, failure) {
+		t.Fatalf("SaveResult() error = %v, want %v", err, failure)
 	}
 }
 

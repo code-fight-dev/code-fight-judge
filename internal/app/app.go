@@ -36,10 +36,6 @@ type dbCloser interface {
 	Close()
 }
 
-type dbPinger interface {
-	Ping(ctx context.Context) error
-}
-
 type workerRunner interface {
 	Run(ctx context.Context)
 }
@@ -57,7 +53,6 @@ func New() (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init postgres: %w", err)
 	}
-
 	return newApp(cfg, db), nil
 }
 
@@ -74,7 +69,7 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg, judgeMetrics)
 	languagesHandler := apphttp.NewLanguagesHandler(languageRegistry)
 	readiness := &readinessChecker{
-		db: db,
+		checkDatabase: jobsRepo.CheckResultSchema,
 		images: []string{
 			cfg.JudgeCImage,
 			cfg.JudgeGoImage,
@@ -96,6 +91,7 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 		jobsRepo,
 		runnerSvc,
 		callbackClient,
+		callback.Target{URL: cfg.JudgeCallbackURL, Token: cfg.JudgeCallbackToken},
 		judgeMetrics,
 		2*time.Second,
 		cfg.JudgeCallbackAttempts,
@@ -122,7 +118,7 @@ type readinessChecker struct {
 	mu            sync.Mutex
 	checks        map[string]string
 	checkedAt     time.Time
-	db            dbPinger
+	checkDatabase func(ctx context.Context) error
 	images        []string
 	checkDocker   func(ctx context.Context) error
 	inspectDocker func(ctx context.Context, image string) error
@@ -150,7 +146,7 @@ func (c *readinessChecker) check(ctx context.Context) map[string]string {
 		"images": "ok",
 	}
 
-	if err := c.db.Ping(ctx); err != nil {
+	if err := c.checkDatabase(ctx); err != nil {
 		checks["db"] = err.Error()
 	}
 
