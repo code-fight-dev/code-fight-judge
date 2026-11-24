@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -74,10 +75,31 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	first := submitRequest("11111111-1111-1111-1111-111111111111", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "case-1")
 	second := submitRequest("22222222-2222-2222-2222-222222222222", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "case-2")
 
-	firstJob, err := repo.Create(ctx, first)
-	if err != nil {
-		t.Fatalf("Create(first) error = %v", err)
+	const deliveries = 4
+	var wg sync.WaitGroup
+	var responses [deliveries]*jobs.Job
+	var failures [deliveries]error
+	for i := range responses {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			responses[i], failures[i] = repo.Create(ctx, first)
+		}()
 	}
+	wg.Wait()
+	created := 0
+	for i, response := range responses {
+		if failures[i] != nil || response == nil || response.ID != first.SubmissionID {
+			t.Fatalf("delivery %d: job ID does not match the submission, error %v", i, failures[i])
+		}
+		if !response.Replayed {
+			created++
+		}
+	}
+	if created != 1 {
+		t.Fatalf("created %d jobs for repeated delivery, want 1", created)
+	}
+	firstJob := responses[0]
 	secondJob, err := repo.Create(ctx, second)
 	if err != nil {
 		t.Fatalf("Create(second) error = %v", err)

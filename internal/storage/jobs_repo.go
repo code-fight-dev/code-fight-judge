@@ -9,7 +9,6 @@ import (
 
 	"code-fight-judge/internal/jobs"
 
-	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,14 +29,16 @@ func NewJobsRepo(pool *pgxpool.Pool) *JobsRepo {
 
 func (r *JobsRepo) Create(ctx context.Context, req jobs.SubmitRequest) (*jobs.Job, error) {
 	now := time.Now().UTC()
-	id := uuid.NewString()
+	// Backend execution IDs are globally unique UUIDs. Using one as the job
+	// key lets concurrent requests and lost HTTP responses reuse one job.
+	id := req.SubmissionID
 
 	testsJSON, err := json.Marshal(req.Tests)
 	if err != nil {
 		return nil, fmt.Errorf("marshal tests: %w", err)
 	}
 
-	_, err = r.pool.Exec(
+	result, err := r.pool.Exec(
 		ctx,
 		`
 		INSERT INTO judge_jobs (
@@ -58,9 +59,10 @@ func (r *JobsRepo) Create(ctx context.Context, req jobs.SubmitRequest) (*jobs.Jo
 			updated_at,
 			started_at,
 			finished_at
-		) VALUES (
+		) SELECT
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14, $15, NULL, NULL
-		)
+		WHERE NOT EXISTS (SELECT 1 FROM judge_jobs WHERE submission_id = $2)
+		ON CONFLICT (id) DO NOTHING
 		`,
 		id,
 		req.SubmissionID,
@@ -80,6 +82,16 @@ func (r *JobsRepo) Create(ctx context.Context, req jobs.SubmitRequest) (*jobs.Jo
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert judge job: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		var existing jobs.Job
+		if err := r.pool.QueryRow(ctx, `SELECT id, status FROM judge_jobs
+			WHERE submission_id=$1 ORDER BY created_at, id LIMIT 1`, req.SubmissionID).
+			Scan(&existing.ID, &existing.Status); err != nil {
+			return nil, fmt.Errorf("find existing judge job: %w", err)
+		}
+		existing.Replayed = true
+		return &existing, nil
 	}
 
 	return &jobs.Job{

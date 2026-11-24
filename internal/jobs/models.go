@@ -33,6 +33,7 @@ type TestCase struct {
 }
 
 type SubmitRequest struct {
+	DurableDispatch bool       `json:"durable_dispatch,omitempty"`
 	SubmissionID    string     `json:"submission_id"`
 	TaskID          string     `json:"task_id"`
 	Language        string     `json:"language"`
@@ -50,6 +51,7 @@ type SubmitResponse struct {
 }
 
 type Job struct {
+	Replayed        bool
 	ID              string
 	SubmissionID    string
 	TaskID          string
