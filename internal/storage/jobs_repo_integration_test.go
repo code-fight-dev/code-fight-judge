@@ -224,10 +224,22 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	if live, err := repo.ClaimNextQueued(ctx); err != nil || live != nil {
 		t.Fatalf("live claim stolen: %#v err=%v", live, err)
 	}
+	if snapshot, err := repo.WorkloadSnapshot(ctx, time.Minute); err != nil || snapshot.Running != 1 ||
+		len(snapshot.Queued) != 0 || len(snapshot.Arrivals) != 1 || snapshot.Arrivals[0].Count != 3 {
+		t.Fatalf("workload with an active lease = %+v, %v", snapshot, err)
+	}
 	// A previous worker's clock may have been ahead of the database clock.
 	if err := pool.QueryRow(ctx, `UPDATE judge_jobs SET updated_at=clock_timestamp()-interval '3 minutes',
 		started_at=clock_timestamp()+interval '1 day' WHERE id=$1 RETURNING started_at`, oldClaim.ID).Scan(&oldClaim.StartedAt); err != nil {
 		t.Fatal(err)
+	}
+	if snapshot, err := repo.WorkloadSnapshot(ctx, time.Minute); err != nil || snapshot.Running != 0 ||
+		len(snapshot.Queued) != 1 || snapshot.Queued[0].Count != 1 || snapshot.Queued[0].Tests != len(oldClaim.Tests) {
+		t.Fatalf("workload with an expired lease = %+v, %v", snapshot, err)
+	}
+	if samples, err := repo.RecentExecutionSamples(ctx, time.Minute); err != nil || len(samples) != 1 ||
+		samples[0].Tests != len(claimedFirst.Tests) || samples[0].WallSeconds <= 0 {
+		t.Fatalf("recent accepted calibration samples = %+v, %v", samples, err)
 	}
 	newClaim, err := repo.ClaimNextQueued(ctx)
 	if err != nil || newClaim == nil || newClaim.ID != oldClaim.ID {

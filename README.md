@@ -9,6 +9,11 @@ The service is written in Go and uses PostgreSQL for its persistent job queue,
 gVisor (`runsc`) for execution, and Prometheus for metrics. The Kubernetes Job
 executor requires Kubernetes 1.34 or later with pod-level resources enabled.
 
+In Kubernetes, the optional `judge autoscale` command reads recent executions
+and the shared queue from PostgreSQL. It estimates pending worker time by
+language and test count, and updates the configured Judge Deployment's replica
+count. The Infra chart supplies the policy and the autoscaler's permissions.
+
 ## How it works
 
 1. The backend submits source code, a language/version pair, resource limits,
