@@ -52,6 +52,7 @@ type SubmitResponse struct {
 
 type Job struct {
 	Replayed        bool
+	FirstAttempt    bool
 	ID              string
 	SubmissionID    string
 	TaskID          string

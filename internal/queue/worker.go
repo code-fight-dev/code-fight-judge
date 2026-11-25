@@ -43,7 +43,8 @@ type CallbackClient interface {
 }
 
 type Metrics interface {
-	RecordJobStarted()
+	RecordJobStarted(language string, queueWait time.Duration)
+	RecordJobTimings(language string, compileMS, runMS *int)
 	RecordJobFinished(status string, verdict string, language string, duration time.Duration)
 	RecordCallbackAttempt(status string)
 }
@@ -130,13 +131,18 @@ func (w *Worker) processOne(ctx context.Context) error {
 	log.Printf("worker picked job id=%s submission_id=%s", job.ID, job.SubmissionID)
 
 	startedAt := *job.StartedAt
+	language := languages.NormalizeLanguage(job.Language)
 	status := "failed"
 	verdict := "system_error"
 	executionDuration := -time.Nanosecond // no trusted duration for an infrastructure failure
 	if w.metrics != nil {
-		w.metrics.RecordJobStarted()
+		queueWait := -time.Nanosecond
+		if job.FirstAttempt {
+			queueWait = max(0, startedAt.Sub(job.CreatedAt))
+		}
+		w.metrics.RecordJobStarted(language, queueWait)
 		defer func() {
-			w.metrics.RecordJobFinished(status, verdict, languages.NormalizeLanguage(job.Language), executionDuration)
+			w.metrics.RecordJobFinished(status, verdict, language, executionDuration)
 		}()
 	}
 
@@ -194,6 +200,16 @@ func (w *Worker) processOne(ctx context.Context) error {
 		})
 	}
 	verdict = result.Verdict
+	if w.metrics != nil {
+		var compileMS, runMS *int
+		if result.CompileTimeMS > 0 {
+			compileMS = measuredTime(result.CompileTimeMS, result.CompileTimeUnavailable)
+		}
+		if len(result.TestResults) > 0 {
+			runMS = measuredTime(result.RunTimeMS, result.RunTimeUnavailable)
+		}
+		w.metrics.RecordJobTimings(language, compileMS, runMS)
+	}
 	if !result.CompileTimeUnavailable && !result.RunTimeUnavailable {
 		executionDuration = time.Duration(result.DurationMS) * time.Millisecond
 	}

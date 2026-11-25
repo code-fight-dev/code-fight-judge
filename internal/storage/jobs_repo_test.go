@@ -66,6 +66,8 @@ func (r fakeRow) Scan(dest ...any) error {
 			*target = value.(string)
 		case *int:
 			*target = value.(int)
+		case *bool:
+			*target = value.(bool)
 		case *[]byte:
 			*target = value.([]byte)
 		case *jobs.Status:
@@ -209,6 +211,7 @@ func TestJobsRepoClaimNextQueuedReturnsJob(t *testing.T) {
 		now,
 		&startedAt,
 		nil,
+		true,
 	}}}
 	repo := &JobsRepo{pool: db}
 
@@ -220,7 +223,7 @@ func TestJobsRepoClaimNextQueuedReturnsJob(t *testing.T) {
 	if job == nil {
 		t.Fatal("ClaimNextQueued() job = nil")
 	}
-	if job.ID != "job-1" || job.Status != jobs.StatusRunning {
+	if job.ID != "job-1" || job.Status != jobs.StatusRunning || !job.FirstAttempt {
 		t.Fatalf("ClaimNextQueued() job = %#v, want job-1 running", job)
 	}
 	if job.StartedAt == nil || !job.StartedAt.Equal(startedAt) {
@@ -286,6 +289,7 @@ func TestJobsRepoClaimNextQueuedWrapsInvalidTestsJSON(t *testing.T) {
 		now,
 		nil,
 		nil,
+		false,
 	}}}
 	repo := &JobsRepo{pool: db}
 

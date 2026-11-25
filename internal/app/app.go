@@ -59,6 +59,7 @@ func New() (*App, error) {
 func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 	jobsRepo := storage.NewJobsRepo(db)
 	judgeMetrics := metrics.NewJudgeMetrics()
+	judgeMetrics.RegisterQueue(jobsRepo.QueueSnapshot)
 	languageRegistry := languages.NewDefaultRegistry(languages.RuntimeImages{
 		C:      cfg.JudgeCImage,
 		Go:     cfg.JudgeGoImage,
