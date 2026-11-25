@@ -2,7 +2,7 @@ FROM golang:1.27.4-alpine3.24 AS supervisor-builder
 
 WORKDIR /src
 
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY internal/supervisor ./internal/supervisor
 COPY cmd/judge-supervisor ./cmd/judge-supervisor
 

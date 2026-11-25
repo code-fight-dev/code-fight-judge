@@ -6,7 +6,8 @@ cases in isolated containers, and reports verdicts, scores, execution time,
 and memory usage through authenticated callbacks.
 
 The service is written in Go and uses PostgreSQL for its persistent job queue,
-Docker with gVisor (`runsc`) for execution, and Prometheus for metrics.
+gVisor (`runsc`) for execution, and Prometheus for metrics. The Kubernetes Job
+executor requires Kubernetes 1.34 or later with pod-level resources enabled.
 
 ## How it works
 
@@ -136,6 +137,8 @@ go run ./cmd/judge
 | `JUDGE_WORKDIR` | Directory for submission workspaces |
 | `JUDGE_C_IMAGE`, `JUDGE_GO_IMAGE`, `JUDGE_PYTHON_IMAGE`, `JUDGE_CPP_IMAGE`, `JUDGE_NODE_IMAGE` | Runtime image references |
 | `JUDGE_RUNTIME` | Docker runtime; defaults to `runsc` |
+| `JUDGE_EXECUTOR` | `docker` by default, or `kubernetes` for Jobs with the gVisor RuntimeClass |
+| `JUDGE_KUBERNETES_WORKSPACE_CLAIM` | PVC name for the workspace mounted at `JUDGE_WORKDIR` in the Kubernetes executor |
 | `JUDGE_WORKER_COUNT` | Maximum simultaneous executions per Judge instance; defaults to `1` |
 | `JUDGE_COMPILE_TIMEOUT` | Independent compiler wall-time limit; defaults to `60s` |
 | `JUDGE_CPU_COUNT`, `JUDGE_DEFAULT_PIDS`, `JUDGE_DEFAULT_TMPFS_MB` | Sandbox resource settings |
