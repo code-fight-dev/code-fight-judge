@@ -22,7 +22,7 @@ func (r *JobsRepo) SaveResult(ctx context.Context, status jobs.Status, payload c
 		return jobs.ErrLeaseLost
 	}
 	tag, err := r.pool.Exec(ctx, `UPDATE judge_jobs
-		SET status=$2, finished_at=$5, updated_at=clock_timestamp(),
+		SET callback_token='', status=$2, finished_at=$5, updated_at=clock_timestamp(),
 		    result_payload=$6, callback_next_attempt_at=clock_timestamp()
 		WHERE id=$1 AND started_at=$3 AND status=$4`,
 		payload.JudgeSubmissionID, status, payload.StartedAt, jobs.StatusRunning, payload.FinishedAt, payload)

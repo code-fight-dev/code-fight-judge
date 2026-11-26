@@ -196,7 +196,7 @@ func TestCreateSubmissionOverridesCallbackFromConfig(t *testing.T) {
 	if got, want := repo.requests[0].CallbackURL, cfg.JudgeCallbackURL; got != want {
 		t.Fatalf("repo request CallbackURL = %q, want %q", got, want)
 	}
-	if got, want := repo.requests[0].CallbackToken, cfg.JudgeCallbackToken; got != want {
+	if got, want := repo.requests[0].CallbackToken, ""; got != want {
 		t.Fatalf("repo request CallbackToken = %q, want %q", got, want)
 	}
 }
@@ -279,13 +279,6 @@ func TestValidateSubmitRequestRejectsInvalidRequests(t *testing.T) {
 				req.CallbackURL = ""
 			},
 			wantErr: "callback_url is required",
-		},
-		{
-			name: "callback token",
-			mutate: func(req *jobs.SubmitRequest) {
-				req.CallbackToken = ""
-			},
-			wantErr: "callback_token is required",
 		},
 		{
 			name: "time min",

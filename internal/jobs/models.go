@@ -60,7 +60,6 @@ type Job struct {
 	LanguageVersion string
 	SourceCode      string
 	CallbackURL     string
-	CallbackToken   string
 	Limits          Limits
 	Tests           []TestCase
 	Status          Status

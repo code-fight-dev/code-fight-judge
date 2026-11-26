@@ -82,7 +82,14 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	if _, err := pool.Exec(ctx, `ALTER TABLE judge_jobs
 		ADD COLUMN result_payload JSON,
 		ADD COLUMN callback_next_attempt_at TIMESTAMPTZ,
-		ADD COLUMN callback_attempts BIGINT NOT NULL DEFAULT 0`); err != nil {
+		ADD COLUMN callback_attempts BIGINT NOT NULL DEFAULT 0;
+CREATE VIEW judge_workload AS
+SELECT language, status, created_at, updated_at, started_at, finished_at,
+       jsonb_array_length(tests_json) AS tests,
+       result_payload IS NOT NULL AS has_result,
+       result_payload->>'verdict' AS verdict,
+       (result_payload->>'compile_time_ms')::double precision AS compile_time_ms
+FROM judge_jobs;`); err != nil {
 		t.Fatalf("apply result schema: %v", err)
 	}
 	if err := repo.CheckResultSchema(ctx); err != nil {
