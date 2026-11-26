@@ -92,7 +92,13 @@ func (p policy) estimate(snapshot storage.WorkloadSnapshot, serviceTimes map[str
 	arrivals, arrivalWork := cost(snapshot.Arrivals)
 	arrivalRate := float64(arrivals) / p.arrivalWindow.Seconds()
 	arrivalWorkRate := arrivalWork / p.arrivalWindow.Seconds()
-	slots := (arrivalWorkRate + backlogWork/p.drainTarget.Seconds()) / p.utilization
+	steadySlots := arrivalWorkRate / p.utilization
+	if queued > 0 {
+		// Reserve at least the occupied slots before allocating spare capacity
+		// to drain the backlog. Recent arrivals can include these same jobs.
+		steadySlots = max(steadySlots, float64(snapshot.Running))
+	}
+	slots := steadySlots + backlogWork/(p.drainTarget.Seconds()*p.utilization)
 	replicas := min(float64(p.maxReplicas), max(float64(p.minReplicas), math.Ceil(slots/float64(p.workersPerPod))))
 	var throughput float64
 	if arrivalWork > 0 {

@@ -30,6 +30,29 @@ func TestEstimateUsesLanguageTestCountAndArrivalMix(t *testing.T) {
 	}
 }
 
+func TestEstimateReservesBusySlotsWhileDrainingBacklog(t *testing.T) {
+	p := policy{arrivalWindow: 10 * time.Second, drainTarget: 10 * time.Second,
+		workersPerPod: 1, utilization: 0.8, minReplicas: 1, maxReplicas: 8}
+	times := map[string]serviceTime{"python": {perTestSeconds: 1}}
+	snapshot := storage.WorkloadSnapshot{
+		Running: 1, Queued: []storage.WorkloadBucket{{Language: "python", Tests: 1, Count: 1}},
+	}
+	// The running job was submitted before the arrival window. Its worker is
+	// still occupied, so the queued job needs another replica to start in time.
+	if got := p.estimate(snapshot, times).replicas; got != 2 {
+		t.Fatalf("replicas with an occupied worker and one queued job = %d, want 2", got)
+	}
+	snapshot.Arrivals = []storage.WorkloadBucket{{Language: "python", Tests: 1, Count: 16}}
+	if got := p.estimate(snapshot, times).replicas; got != 3 {
+		t.Fatalf("replicas with arrivals already covering busy work = %d, want 3", got)
+	}
+	snapshot.Arrivals = nil
+	snapshot.Queued = nil
+	if got := p.estimate(snapshot, times).replicas; got != 1 {
+		t.Fatalf("replicas with no backlog = %d, want 1", got)
+	}
+}
+
 func TestEstimatesIncludeSandboxOverhead(t *testing.T) {
 	times := estimateServiceTimes([]storage.ExecutionSample{
 		{Language: "go", WallSeconds: 15, CompileSeconds: 9, Tests: 3},
