@@ -32,6 +32,7 @@ type Config struct {
 	JudgeCImage           string
 	JudgeNodeImage        string
 	JudgeRuntime          string
+	JudgeWorkerCount      int
 	JudgeCompileTimeout   time.Duration
 	JudgeCPUCount         float64
 	JudgeDefaultMemoryMB  int
@@ -50,6 +51,10 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	workerCount, err := strconv.Atoi(getString("JUDGE_WORKER_COUNT", "1"))
+	if err != nil || workerCount < 1 {
+		return Config{}, fmt.Errorf("JUDGE_WORKER_COUNT must be a positive integer")
+	}
 	cfg := Config{
 		AppEnv:          getString("APP_ENV", "dev"),
 		HTTPHost:        getString("HTTP_HOST", "0.0.0.0"),
@@ -68,6 +73,7 @@ func Load() (Config, error) {
 		JudgeCPPImage:         getString("JUDGE_CPP_IMAGE", "judge-cpp:20"),
 		JudgeNodeImage:        getString("JUDGE_NODE_IMAGE", "judge-node:24"),
 		JudgeRuntime:          getString("JUDGE_RUNTIME", "runsc"),
+		JudgeWorkerCount:      workerCount,
 		JudgeCImage:           getString("JUDGE_C_IMAGE", "judge-c:23"),
 		JudgeCompileTimeout:   getDuration("JUDGE_COMPILE_TIMEOUT", DefaultCompileTimeout),
 		JudgeCPUCount:         getFloat64("JUDGE_CPU_COUNT", 1),

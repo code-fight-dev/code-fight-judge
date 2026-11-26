@@ -118,12 +118,14 @@ type fakeMetrics struct {
 var testCallbackTarget = callback.Target{URL: "https://backend.example.test/callback", Token: "callback-token"}
 
 func newTestWorker(store JobsStore, runner Runner, client CallbackClient, metrics Metrics, poll time.Duration, attempts int, backoff time.Duration) *Worker {
-	return NewWorker(store, runner, client, testCallbackTarget, metrics, poll, attempts, backoff)
+	return NewWorker(store, runner, client, testCallbackTarget, metrics, poll, attempts, backoff, 1)
 }
 
-func (m *fakeMetrics) RecordJobStarted() {
+func (m *fakeMetrics) RecordJobStarted(string, time.Duration) {
 	m.started++
 }
+
+func (m *fakeMetrics) RecordJobTimings(string, *int, *int) {}
 
 func (m *fakeMetrics) RecordJobFinished(status string, verdict string, language string, duration time.Duration) {
 	m.finishedStatuses = append(m.finishedStatuses, status)

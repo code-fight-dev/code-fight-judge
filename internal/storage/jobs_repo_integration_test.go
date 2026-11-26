@@ -124,6 +124,9 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	if firstJob.Status != jobs.StatusQueued || secondJob.Status != jobs.StatusQueued {
 		t.Fatalf("created statuses = %q/%q, want queued/queued", firstJob.Status, secondJob.Status)
 	}
+	if depth, age, err := repo.QueueSnapshot(ctx); err != nil || depth != 2 || age < 0 {
+		t.Fatalf("queue snapshot = %d, %f, %v", depth, age, err)
+	}
 
 	claimedFirst, err := repo.ClaimNextQueued(ctx)
 	if err != nil {
@@ -135,7 +138,7 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	if claimedFirst.ID != firstJob.ID {
 		t.Fatalf("ClaimNextQueued(first).ID = %q, want %q", claimedFirst.ID, firstJob.ID)
 	}
-	if claimedFirst.Status != jobs.StatusRunning {
+	if claimedFirst.Status != jobs.StatusRunning || !claimedFirst.FirstAttempt {
 		t.Fatalf("ClaimNextQueued(first).Status = %q, want running", claimedFirst.Status)
 	}
 	if claimedFirst.StartedAt == nil {
@@ -232,6 +235,9 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	}
 	if newClaim.StartedAt == nil || !newClaim.StartedAt.After(*oldClaim.StartedAt) {
 		t.Fatalf("attempt marker did not increase: old=%v new=%v", oldClaim.StartedAt, newClaim.StartedAt)
+	}
+	if newClaim.FirstAttempt {
+		t.Fatal("reclaimed execution counted as a first attempt")
 	}
 	if err := repo.RenewLease(ctx, oldClaim.ID, oldClaim.StartedAt); !errors.Is(err, jobs.ErrLeaseLost) {
 		t.Fatalf("stale renewal=%v", err)

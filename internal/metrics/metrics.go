@@ -20,6 +20,9 @@ type JudgeMetrics struct {
 	jobsRunning       prometheus.Gauge
 	jobsFinishedTotal *prometheus.CounterVec
 	executionDuration *prometheus.HistogramVec
+	queueWait         *prometheus.HistogramVec
+	compileDuration   *prometheus.HistogramVec
+	runDuration       *prometheus.HistogramVec
 	callbackAttempts  *prometheus.CounterVec
 	sandboxTimeouts   *prometheus.CounterVec
 	sandboxOOM        *prometheus.CounterVec
@@ -80,6 +83,12 @@ func NewJudgeMetrics() *JudgeMetrics {
 			},
 			[]string{"language"},
 		),
+		queueWait: newJobHistogram("codefight_judge_queue_wait_duration_seconds",
+			"Seconds from enqueue until a Judge job is first claimed.", []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300}),
+		compileDuration: newJobHistogram("codefight_judge_compile_duration_seconds",
+			"Measured compiler duration by language.", []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 20, 40, 60, 120}),
+		runDuration: newJobHistogram("codefight_judge_run_duration_seconds",
+			"Measured total test execution duration by language.", []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120}),
 		callbackAttempts: prometheus.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "codefight_judge_callback_attempts_total",
@@ -132,6 +141,9 @@ func NewJudgeMetrics() *JudgeMetrics {
 		m.jobsRunning,
 		m.jobsFinishedTotal,
 		m.executionDuration,
+		m.queueWait,
+		m.compileDuration,
+		m.runDuration,
 		m.callbackAttempts,
 		m.sandboxTimeouts,
 		m.sandboxOOM,
@@ -174,8 +186,24 @@ func (m *JudgeMetrics) RecordJobCreated(language string) {
 	m.jobsCreatedTotal.WithLabelValues(language).Inc()
 }
 
-func (m *JudgeMetrics) RecordJobStarted() {
+func newJobHistogram(name, help string, buckets []float64) *prometheus.HistogramVec {
+	return prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: help, Buckets: buckets}, []string{"language"})
+}
+
+func (m *JudgeMetrics) RecordJobStarted(language string, queueWait time.Duration) {
 	m.jobsRunning.Inc()
+	if queueWait >= 0 {
+		m.queueWait.WithLabelValues(language).Observe(queueWait.Seconds())
+	}
+}
+
+func (m *JudgeMetrics) RecordJobTimings(language string, compileMS, runMS *int) {
+	if compileMS != nil {
+		m.compileDuration.WithLabelValues(language).Observe(float64(*compileMS) / 1000)
+	}
+	if runMS != nil {
+		m.runDuration.WithLabelValues(language).Observe(float64(*runMS) / 1000)
+	}
 }
 
 func (m *JudgeMetrics) RecordJobFinished(status string, verdict string, language string, duration time.Duration) {

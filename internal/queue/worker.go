@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"code-fight-judge/internal/callback"
@@ -22,6 +23,7 @@ type Worker struct {
 	callbackAttempts   int
 	callbackBackoff    time.Duration
 	leaseRenewInterval time.Duration
+	workerCount        int
 }
 
 type JobsStore interface {
@@ -41,7 +43,8 @@ type CallbackClient interface {
 }
 
 type Metrics interface {
-	RecordJobStarted()
+	RecordJobStarted(language string, queueWait time.Duration)
+	RecordJobTimings(language string, compileMS, runMS *int)
 	RecordJobFinished(status string, verdict string, language string, duration time.Duration)
 	RecordCallbackAttempt(status string)
 }
@@ -55,6 +58,7 @@ func NewWorker(
 	pollInterval time.Duration,
 	callbackAttempts int,
 	callbackBackoff time.Duration,
+	workerCount int,
 ) *Worker {
 	if callbackAttempts <= 0 {
 		callbackAttempts = 1
@@ -73,17 +77,24 @@ func NewWorker(
 		callbackAttempts:   callbackAttempts,
 		callbackBackoff:    callbackBackoff,
 		leaseRenewInterval: jobs.LeaseDuration / 3,
+		workerCount:        max(1, workerCount),
 	}
 }
 
 func (w *Worker) Run(ctx context.Context) {
-	deliveryDone := make(chan struct{})
-	go func() {
-		defer close(deliveryDone)
+	var workers sync.WaitGroup
+	workers.Go(func() {
 		w.deliverResults(ctx)
-	}()
-	defer func() { <-deliveryDone }()
+	})
+	for range w.workerCount {
+		workers.Go(func() {
+			w.runJobs(ctx)
+		})
+	}
+	workers.Wait()
+}
 
+func (w *Worker) runJobs(ctx context.Context) {
 	ticker := time.NewTicker(w.pollInterval)
 	defer ticker.Stop()
 
@@ -120,13 +131,18 @@ func (w *Worker) processOne(ctx context.Context) error {
 	log.Printf("worker picked job id=%s submission_id=%s", job.ID, job.SubmissionID)
 
 	startedAt := *job.StartedAt
+	language := languages.NormalizeLanguage(job.Language)
 	status := "failed"
 	verdict := "system_error"
 	executionDuration := -time.Nanosecond // no trusted duration for an infrastructure failure
 	if w.metrics != nil {
-		w.metrics.RecordJobStarted()
+		queueWait := -time.Nanosecond
+		if job.FirstAttempt {
+			queueWait = max(0, startedAt.Sub(job.CreatedAt))
+		}
+		w.metrics.RecordJobStarted(language, queueWait)
 		defer func() {
-			w.metrics.RecordJobFinished(status, verdict, languages.NormalizeLanguage(job.Language), executionDuration)
+			w.metrics.RecordJobFinished(status, verdict, language, executionDuration)
 		}()
 	}
 
@@ -184,6 +200,16 @@ func (w *Worker) processOne(ctx context.Context) error {
 		})
 	}
 	verdict = result.Verdict
+	if w.metrics != nil {
+		var compileMS, runMS *int
+		if result.CompileTimeMS > 0 {
+			compileMS = measuredTime(result.CompileTimeMS, result.CompileTimeUnavailable)
+		}
+		if len(result.TestResults) > 0 {
+			runMS = measuredTime(result.RunTimeMS, result.RunTimeUnavailable)
+		}
+		w.metrics.RecordJobTimings(language, compileMS, runMS)
+	}
 	if !result.CompileTimeUnavailable && !result.RunTimeUnavailable {
 		executionDuration = time.Duration(result.DurationMS) * time.Millisecond
 	}

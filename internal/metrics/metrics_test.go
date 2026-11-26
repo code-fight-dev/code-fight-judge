@@ -32,15 +32,17 @@ func TestJudgeMetricsRecordsJobsAndCallbacks(t *testing.T) {
 	judgeMetrics := NewJudgeMetrics()
 
 	judgeMetrics.RecordJobCreated("go")
-	judgeMetrics.RecordJobStarted()
+	judgeMetrics.RecordJobStarted("go", 500*time.Millisecond)
+	compileMS, runMS := 150, 100
+	judgeMetrics.RecordJobTimings("go", &compileMS, &runMS)
 	judgeMetrics.RecordJobFinished("finished", "time_limit_exceeded", "go", 250*time.Millisecond)
-	judgeMetrics.RecordJobStarted()
+	judgeMetrics.RecordJobStarted("python", -1)
 	judgeMetrics.RecordJobFinished("failed", "memory_limit_exceeded", "python", 500*time.Millisecond)
-	judgeMetrics.RecordJobStarted()
+	judgeMetrics.RecordJobStarted("go", -1)
 	judgeMetrics.RecordJobFinished("failed", "compile_error", "go", time.Second)
-	judgeMetrics.RecordJobStarted()
+	judgeMetrics.RecordJobStarted("go", -1)
 	judgeMetrics.RecordJobFinished("failed", "runtime_error", "go", time.Second)
-	judgeMetrics.RecordJobStarted()
+	judgeMetrics.RecordJobStarted("go", -1)
 	judgeMetrics.RecordJobFinished("failed", "output_directory_limit_exceeded", "go", time.Second)
 	judgeMetrics.RecordCallbackAttempt("success")
 	judgeMetrics.RecordCallbackAttempt("error")
@@ -50,6 +52,9 @@ func TestJudgeMetricsRecordsJobsAndCallbacks(t *testing.T) {
 	for _, want := range []string{
 		`codefight_judge_jobs_created_total{language="go"} 1`,
 		`codefight_judge_jobs_running 0`,
+		`codefight_judge_queue_wait_duration_seconds_count{language="go"} 1`,
+		`codefight_judge_compile_duration_seconds_sum{language="go"} 0.15`,
+		`codefight_judge_run_duration_seconds_sum{language="go"} 0.1`,
 		`codefight_judge_jobs_finished_total{language="go",status="finished",verdict="time_limit_exceeded"} 1`,
 		`codefight_judge_jobs_finished_total{language="python",status="failed",verdict="memory_limit_exceeded"} 1`,
 		`codefight_judge_sandbox_timeouts_total{language="go"} 1`,
