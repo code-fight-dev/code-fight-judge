@@ -444,7 +444,6 @@ func testJob() *jobs.Job {
 		Language:        "go",
 		LanguageVersion: "1.24",
 		CallbackURL:     "https://backend.example.test/callback",
-		CallbackToken:   "callback-token",
 		Limits: jobs.Limits{
 			TimeMS:   1000,
 			MemoryMB: 128,

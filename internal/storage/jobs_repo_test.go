@@ -143,6 +143,9 @@ func TestJobsRepoCreateInsertsQueuedJob(t *testing.T) {
 	if call.args[1] != req.SubmissionID || call.args[2] != req.TaskID {
 		t.Fatalf("Exec request ids = %#v/%#v, want request ids", call.args[1], call.args[2])
 	}
+	if call.args[7] != "" {
+		t.Fatal("persisted a callback credential")
+	}
 	if call.args[12] != jobs.StatusQueued {
 		t.Fatalf("Exec status arg = %#v, want queued", call.args[12])
 	}
@@ -199,7 +202,6 @@ func TestJobsRepoClaimNextQueuedReturnsJob(t *testing.T) {
 		"1.24",
 		"package main",
 		"https://backend.example.test/callback",
-		"callback-token",
 		1000,
 		128,
 		64,
@@ -276,7 +278,6 @@ func TestJobsRepoClaimNextQueuedWrapsInvalidTestsJSON(t *testing.T) {
 		"1.24",
 		"package main",
 		"https://backend.example.test/callback",
-		"callback-token",
 		1000,
 		128,
 		64,
