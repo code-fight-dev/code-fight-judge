@@ -55,7 +55,7 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 		}
 
 		req.CallbackURL = h.cfg.JudgeCallbackURL
-		req.CallbackToken = h.cfg.JudgeCallbackToken
+		req.CallbackToken = "" // Accepted from older clients, never stored.
 
 		if err := validateSubmitRequest(req, h.languages, h.cfg); err != nil {
 			writeError(w, stdhttp.StatusBadRequest, "validation_error", err.Error())
@@ -94,8 +94,6 @@ func validateSubmitRequest(req jobs.SubmitRequest, languageRegistry *languages.R
 		return errors.New("source_code is required")
 	case strings.TrimSpace(req.CallbackURL) == "":
 		return errors.New("callback_url is required")
-	case strings.TrimSpace(req.CallbackToken) == "":
-		return errors.New("callback_token is required")
 	case req.Limits.TimeMS <= 0:
 		return errors.New("limits.time_ms must be > 0")
 	case req.Limits.TimeMS > cfg.JudgeMaxTimeMS:
