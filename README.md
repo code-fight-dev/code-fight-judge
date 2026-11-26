@@ -103,6 +103,9 @@ so concurrent requests cannot start an unbounded number of Docker checks.
 Prerequisites: Go 1.27.4 or later, PostgreSQL, Docker, and the `runsc` runtime.
 The PostgreSQL database must contain the `judge_jobs` table; its schema is
 managed by the [backend migrations](https://github.com/code-fight-dev/code-fight-backend/tree/main/internal/database/migrations).
+Judge requires Backend migration `038_judge_results.sql` before processing jobs.
+Judge stores the terminal callback payload with the completed job. Pending
+callbacks are retried after a restart using the current callback configuration.
 
 Build runtime images from the repository root:
 

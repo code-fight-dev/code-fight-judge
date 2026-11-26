@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"code-fight-judge/internal/callback"
 	"code-fight-judge/internal/jobs"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -71,6 +73,21 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	}
 
 	repo := NewJobsRepo(pool)
+	if err := repo.CheckResultSchema(ctx); err == nil {
+		t.Fatal("result schema check succeeded before migration")
+	}
+	if job, err := repo.ClaimNextQueued(ctx); err == nil || job != nil {
+		t.Fatalf("execution claim before migration = %#v, %v", job, err)
+	}
+	if _, err := pool.Exec(ctx, `ALTER TABLE judge_jobs
+		ADD COLUMN result_payload JSON,
+		ADD COLUMN callback_next_attempt_at TIMESTAMPTZ,
+		ADD COLUMN callback_attempts BIGINT NOT NULL DEFAULT 0`); err != nil {
+		t.Fatalf("apply result schema: %v", err)
+	}
+	if err := repo.CheckResultSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	first := submitRequest("11111111-1111-1111-1111-111111111111", "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "case-1")
 	second := submitRequest("22222222-2222-2222-2222-222222222222", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "case-2")
@@ -128,10 +145,42 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 		t.Fatalf("ClaimNextQueued(first).Tests = %#v, want case-1", claimedFirst.Tests)
 	}
 
-	if err := repo.MarkFinished(ctx, claimedFirst.ID, claimedFirst.StartedAt); err != nil {
-		t.Fatalf("MarkFinished() error = %v", err)
+	accepted := resultFor(claimedFirst, "accepted")
+	accepted.Tests = []callback.TestResult{{TestCaseID: "case-1", Status: "accepted"}}
+	if err := repo.SaveResult(ctx, jobs.StatusFinished, accepted); err != nil {
+		t.Fatal(err)
 	}
 	assertStoredStatus(t, ctx, pool, claimedFirst.ID, jobs.StatusFinished)
+
+	delivery, err := repo.ClaimResult(ctx, time.Minute)
+	if err != nil || delivery == nil || delivery.Attempt != 1 || !reflect.DeepEqual(delivery.Payload, accepted) {
+		t.Fatalf("claim result = %#v, %v", delivery, err)
+	}
+	restarted := NewJobsRepo(pool)
+	if pending, err := restarted.ClaimResult(ctx, time.Minute); err != nil || pending != nil {
+		t.Fatalf("active delivery claim was reclaimed: %#v, %v", pending, err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE judge_jobs SET callback_next_attempt_at=now() WHERE id=$1", claimedFirst.ID); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := restarted.ClaimResult(ctx, time.Minute)
+	if err != nil || replay == nil || replay.Attempt != 2 || !reflect.DeepEqual(replay.Payload, delivery.Payload) {
+		t.Fatalf("replayed result = %#v, %v", replay, err)
+	}
+	if err := repo.FinishResultDelivery(ctx, claimedFirst.ID, delivery.Attempt, nil); err != nil {
+		t.Fatal(err)
+	}
+	var pending bool
+	if err := pool.QueryRow(ctx, "SELECT callback_next_attempt_at IS NOT NULL FROM judge_jobs WHERE id=$1",
+		claimedFirst.ID).Scan(&pending); err != nil || !pending {
+		t.Fatalf("old delivery changed current claim: pending=%t, %v", pending, err)
+	}
+	if err := restarted.FinishResultDelivery(ctx, claimedFirst.ID, replay.Attempt, nil); err != nil {
+		t.Fatal(err)
+	}
+	if pending, err := restarted.ClaimResult(ctx, time.Minute); err != nil || pending != nil {
+		t.Fatalf("acknowledged result claimed again: %#v, %v", pending, err)
+	}
 
 	claimedSecond, err := repo.ClaimNextQueued(ctx)
 	if err != nil {
@@ -143,8 +192,8 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	if claimedSecond.ID != secondJob.ID {
 		t.Fatalf("ClaimNextQueued(second).ID = %q, want %q", claimedSecond.ID, secondJob.ID)
 	}
-	if err := repo.MarkFailed(ctx, claimedSecond.ID, claimedSecond.StartedAt); err != nil {
-		t.Fatalf("MarkFailed() error = %v", err)
+	if err := repo.SaveResult(ctx, jobs.StatusFailed, resultFor(claimedSecond, "system_error")); err != nil {
+		t.Fatal(err)
 	}
 	assertStoredStatus(t, ctx, pool, claimedSecond.ID, jobs.StatusFailed)
 
@@ -187,11 +236,20 @@ func TestJobsRepoIntegrationPostgresLifecycle(t *testing.T) {
 	if err := repo.RenewLease(ctx, oldClaim.ID, oldClaim.StartedAt); !errors.Is(err, jobs.ErrLeaseLost) {
 		t.Fatalf("stale renewal=%v", err)
 	}
-	if err := repo.MarkFinished(ctx, oldClaim.ID, oldClaim.StartedAt); !errors.Is(err, jobs.ErrLeaseLost) {
+	if err := repo.SaveResult(ctx, jobs.StatusFinished, resultFor(oldClaim, "accepted")); !errors.Is(err, jobs.ErrLeaseLost) {
 		t.Fatalf("stale completion=%v", err)
 	}
-	if err := repo.MarkFinished(ctx, newClaim.ID, newClaim.StartedAt); err != nil {
+	if err := repo.SaveResult(ctx, jobs.StatusFinished, resultFor(newClaim, "accepted")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func resultFor(job *jobs.Job, verdict string) callback.ResultRequest {
+	startedAt := job.StartedAt.UTC()
+	finishedAt := time.Now().UTC()
+	return callback.ResultRequest{
+		JudgeSubmissionID: job.ID, SubmissionID: job.SubmissionID, JudgeStatus: "finished",
+		StartedAt: &startedAt, FinishedAt: &finishedAt, Verdict: &verdict, Tests: []callback.TestResult{},
 	}
 }
 

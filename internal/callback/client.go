@@ -15,6 +15,16 @@ type Client struct {
 	targetURL  string
 }
 
+type Target struct {
+	URL   string
+	Token string
+}
+
+type Delivery struct {
+	Payload ResultRequest
+	Attempt int64
+}
+
 func NewClient(timeout time.Duration, targetURL string) *Client {
 	if timeout <= 0 {
 		timeout = 10 * time.Second

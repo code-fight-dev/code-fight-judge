@@ -38,8 +38,8 @@ func (w *fakeWorker) Run(ctx context.Context) {
 
 func TestReadinessCheckerReportsOK(t *testing.T) {
 	checker := readinessChecker{
-		db:     &fakeDB{},
-		images: []string{"judge-go:test", " judge-python:test "},
+		checkDatabase: (&fakeDB{}).Ping,
+		images:        []string{"judge-go:test", " judge-python:test "},
 		checkDocker: func(ctx context.Context) error {
 			return nil
 		},
@@ -60,7 +60,7 @@ func TestReadinessCheckerReportsOK(t *testing.T) {
 func TestReadinessCheckerSharesAndExpiresFailedProbe(t *testing.T) {
 	var probes atomic.Int32
 	checker := &readinessChecker{
-		db: &fakeDB{},
+		checkDatabase: (&fakeDB{}).Ping,
 		checkDocker: func(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				t.Errorf("probe inherited canceled request: %v", err)
@@ -154,8 +154,8 @@ func TestDockerCommandChecksReturnErrors(t *testing.T) {
 
 func TestReadinessCheckerReportsFailures(t *testing.T) {
 	checker := readinessChecker{
-		db:     &fakeDB{pingErr: errors.New("db down")},
-		images: []string{"", "judge-go:test"},
+		checkDatabase: (&fakeDB{pingErr: errors.New("db down")}).Ping,
+		images:        []string{"", "judge-go:test"},
 		checkDocker: func(ctx context.Context) error {
 			return errors.New("docker down")
 		},
@@ -179,8 +179,8 @@ func TestReadinessCheckerReportsFailures(t *testing.T) {
 
 func TestReadinessCheckerReportsEmptyImageReference(t *testing.T) {
 	checker := readinessChecker{
-		db:     &fakeDB{},
-		images: []string{" "},
+		checkDatabase: (&fakeDB{}).Ping,
+		images:        []string{" "},
 		checkDocker: func(ctx context.Context) error {
 			return nil
 		},
