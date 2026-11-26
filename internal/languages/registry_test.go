@@ -5,6 +5,18 @@ import (
 	"testing"
 )
 
+func TestJavaRuntimeRequiresConfiguredImage(t *testing.T) {
+	if NewDefaultRegistry(RuntimeImages{}).IsSupported(JavaLanguage, JavaVersion) {
+		t.Fatal("Java is supported without a runtime image")
+	}
+	registry := NewDefaultRegistry(RuntimeImages{Java: "judge-java:test"})
+	java, ok := registry.Lookup(JavaLanguage, JavaVersion)
+	if !ok || java.Image != "judge-java:test" || java.SourceFile != "Main.java" ||
+		java.CompileCommand[0] != "javac" || java.RunCommand[0] != "java" {
+		t.Fatalf("unexpected Java definition: %+v", java)
+	}
+}
+
 func TestRegistryLookupNormalizesLanguageAndVersion(t *testing.T) {
 	registry := NewDefaultRegistry(RuntimeImages{
 		Go:     "judge-go:test",

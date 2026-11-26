@@ -12,6 +12,8 @@ const (
 	PythonVersion      = "3.12"
 	CPPLanguage        = "cpp"
 	CPPVersion         = "20"
+	JavaLanguage       = "java"
+	JavaVersion        = "21"
 	JavaScriptLanguage = "javascript"
 	JavaScriptVersion  = "node24"
 	TypeScriptLanguage = "typescript"
@@ -25,6 +27,7 @@ type RuntimeImages struct {
 	Go     string
 	Python string
 	CPP    string
+	Java   string
 	Node   string
 }
 
@@ -63,7 +66,7 @@ func NewDefaultRegistry(images RuntimeImages) *Registry {
 		images.C = "judge-c:23"
 	}
 
-	return NewRegistry([]Definition{
+	definitions := []Definition{
 		{
 			Language: CPPLanguage, Version: CPPVersion, Image: images.CPP,
 			SourceFile:     "main.cpp",
@@ -116,7 +119,17 @@ func NewDefaultRegistry(images RuntimeImages) *Registry {
 
 			RunCommand: []string{"/output/program"},
 		},
-	})
+	}
+	if strings.TrimSpace(images.Java) != "" {
+		definitions = append(definitions, Definition{
+			Language: JavaLanguage, Version: JavaVersion, Image: images.Java, SourceFile: "Main.java",
+			CompileCommand: []string{"javac", "-J-Xmx64m", "-J-XX:+UseSerialGC", "-J-XX:ActiveProcessorCount=1", "-J-Xshare:off",
+				"-proc:none", "-encoding", "UTF-8", "--release", "21", "-d", "/output", "/workspace/Main.java"},
+			RunCommand: []string{"java", "-Xms8m", "-Xmx32m", "-XX:+UseSerialGC", "-XX:ActiveProcessorCount=1", "-Xshare:off",
+				"-cp", "/output", "Main"},
+		})
+	}
+	return NewRegistry(definitions)
 }
 
 func NewRegistry(definitions []Definition) *Registry {

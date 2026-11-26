@@ -60,6 +60,33 @@ func TestRunnerIntegrationRealSandboxPythonAccepted(t *testing.T) {
 	}
 }
 
+func TestRunnerIntegrationRealSandboxJava(t *testing.T) {
+	image := os.Getenv("JUDGE_INTEGRATION_JAVA_IMAGE")
+	if image == "" {
+		t.Skip("set JUDGE_INTEGRATION_JAVA_IMAGE to run Java in the sandbox")
+	}
+	cfg, _ := realSandboxIntegrationConfig(t)
+	registry := languages.NewDefaultRegistry(languages.RuntimeImages{Java: image})
+	service := NewService(cfg, sandbox.NewRunscExecutor(), registry)
+	for _, tc := range []struct{ name, source, verdict string }{
+		{"accepted", `public class Main { public static void main(String[] args) throws Exception {
+    System.out.write(System.in.readAllBytes());
+} }`, "accepted"},
+		{"syntax error", `public class Main { public static void main(String[] args) { missing; } }`, "compile_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := service.Run(context.Background(), &jobs.Job{
+				ID: "java-" + tc.verdict, Language: languages.JavaLanguage, LanguageVersion: languages.JavaVersion,
+				SourceCode: tc.source, Limits: jobs.Limits{TimeMS: 3000, MemoryMB: 128, OutputKB: 64},
+				Tests: []jobs.TestCase{{ID: "echo", Input: "Java\n", ExpectedOutput: "Java", Points: 1}},
+			})
+			if err != nil || result.Verdict != tc.verdict {
+				t.Fatalf("Java result = %+v, err = %v, want %s", result, err, tc.verdict)
+			}
+		})
+	}
+}
+
 func TestRunnerIntegrationRealSandboxGoCompileAndRun(t *testing.T) {
 	cfg, registry := realSandboxIntegrationConfig(t)
 	service := NewService(cfg, sandbox.NewRunscExecutor(), registry)

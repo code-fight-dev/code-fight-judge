@@ -38,6 +38,7 @@ again after its lease expires. It becomes terminal only after delivery succeeds.
 | Go | `go` | `1.24` | `judge-go:1.27` |
 | Python | `python` | `3.12` | `judge-python:3.12` |
 | C++ | `cpp` | `20` | `judge-cpp:20` |
+| Java | `java` | `21` | `judge-java:21` (opt-in) |
 | JavaScript | `javascript` | `node24` | `judge-node:24` |
 | TypeScript | `typescript` | `5.9.3` | `judge-node:24` |
 
@@ -49,6 +50,12 @@ The Go API version remains `1.24` for backend compatibility; its runtime image
 uses the maintained Go 1.27 toolchain.
 
 ## Submission contract
+
+Java submissions provide a package-free `public class Main` with a
+`public static void main(String[] args)` entry point. Each test sends input on
+stdin and checks stdout. The JVM uses a 32 MiB heap inside the sandbox memory
+limit. Set `JUDGE_JAVA_IMAGE=judge-java:21` in the local Compose environment to
+build the image and advertise `java` version `21` in `GET /languages`.
 
 Go, C++, JavaScript, and TypeScript support a `Solve` or `solve` function.
 Arguments are consecutive JSON values in parameter order; string results are
