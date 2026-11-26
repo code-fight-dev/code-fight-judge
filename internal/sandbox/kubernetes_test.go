@@ -1,12 +1,54 @@
 package sandbox
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	core "k8s.io/api/core/v1"
+	meta "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+func TestSandboxOOMUsesOnlyItsPodCgroup(t *testing.T) {
+	root := t.TempDir()
+	pod := core.Pod{
+		ObjectMeta: meta.ObjectMeta{Name: "sandbox", UID: "ca21a2c4-144c-4951-8db3-92de63c93d44"},
+		Spec:       core.PodSpec{NodeName: "node-1"},
+	}
+	executor := &KubernetesExecutor{nodeName: "node-1", cgroupRoot: root}
+	// A node-level OOM or a memory event from another pod is irrelevant.
+	if err := os.WriteFile(filepath.Join(root, "memory.events"), []byte("oom 3\noom_kill 3\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if killed, err := executor.sandboxOOM(pod); err == nil || killed {
+		t.Fatalf("missing pod cgroup accepted: killed=%v err=%v", killed, err)
+	}
+	group := filepath.Join(root, "kubepods", "pod"+string(pod.UID))
+	if err := os.MkdirAll(group, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		events string
+		killed bool
+	}{
+		{"ordinary SIGKILL", "oom 0\noom_kill 0\n", false},
+		{"global OOM victim", "oom 0\noom_kill 1\n", false},
+		{"reached limit without kill", "oom 1\noom_kill 0\n", false},
+		{"sandbox memory limit", "oom 1\noom_kill 1\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(group, "memory.events"), []byte(tc.events), 0600); err != nil {
+				t.Fatal(err)
+			}
+			killed, err := executor.sandboxOOM(pod)
+			if err != nil || killed != tc.killed {
+				t.Fatalf("sandbox OOM = %v, %v; want %v", killed, err, tc.killed)
+			}
+		})
+	}
+}
 
 func TestKubernetesSandboxJobUsesBoundedIsolatedRuntime(t *testing.T) {
 	executor := &KubernetesExecutor{pvc: "judge-workspace"}
