@@ -30,6 +30,7 @@ type Config struct {
 	JudgePythonImage      string
 	JudgeCPPImage         string
 	JudgeJavaImage        string
+	JudgeCSharpImage      string
 	JudgeCImage           string
 	JudgeNodeImage        string
 	JudgeRuntime          string
@@ -75,6 +76,7 @@ func Load() (Config, error) {
 		JudgePythonImage:      getString("JUDGE_PYTHON_IMAGE", "judge-python:3.12"),
 		JudgeCPPImage:         getString("JUDGE_CPP_IMAGE", "judge-cpp:20"),
 		JudgeJavaImage:        strings.TrimSpace(os.Getenv("JUDGE_JAVA_IMAGE")),
+		JudgeCSharpImage:      strings.TrimSpace(os.Getenv("JUDGE_CSHARP_IMAGE")),
 		JudgeNodeImage:        getString("JUDGE_NODE_IMAGE", "judge-node:24"),
 		JudgeRuntime:          getString("JUDGE_RUNTIME", "runsc"),
 		JudgeExecutor:         getString("JUDGE_EXECUTOR", "docker"),
@@ -203,6 +205,9 @@ func Load() (Config, error) {
 		}
 		if cfg.JudgeJavaImage != "" && !strings.Contains(cfg.JudgeJavaImage, "@sha256:") {
 			return Config{}, fmt.Errorf("JUDGE_JAVA_IMAGE must be pinned by digest in prod")
+		}
+		if cfg.JudgeCSharpImage != "" && !strings.Contains(cfg.JudgeCSharpImage, "@sha256:") {
+			return Config{}, fmt.Errorf("JUDGE_CSHARP_IMAGE must be pinned by digest in prod")
 		}
 		if !strings.Contains(cfg.JudgeNodeImage, "@sha256:") {
 			return Config{}, fmt.Errorf("JUDGE_NODE_IMAGE must be pinned by digest in prod")

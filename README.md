@@ -39,6 +39,7 @@ again after its lease expires. It becomes terminal only after delivery succeeds.
 | Python | `python` | `3.12` | `judge-python:3.12` |
 | C++ | `cpp` | `20` | `judge-cpp:20` |
 | Java | `java` | `21` | `judge-java:21` (opt-in) |
+| C# | `csharp` | `12.0` | `judge-csharp:12` (opt-in) |
 | JavaScript | `javascript` | `node24` | `judge-node:24` |
 | TypeScript | `typescript` | `5.9.3` | `judge-node:24` |
 
@@ -56,6 +57,12 @@ Java submissions provide a package-free `public class Main` with a
 stdin and checks stdout. The JVM uses a 32 MiB heap inside the sandbox memory
 limit. Set `JUDGE_JAVA_IMAGE=judge-java:21` in the local Compose environment to
 build the image and advertise `java` version `21` in `GET /languages`.
+
+C# submissions provide one `Program.cs` file, with a `Main` method or
+top-level statements, and use stdin and stdout. The .NET 10 runtime limits
+the managed heap to 32 MiB within the sandbox memory limit. Roslyn compiles
+with the SDK's local framework references. Set
+`JUDGE_CSHARP_IMAGE=judge-csharp:12` in local Compose to enable C# 12.
 
 Go, C++, JavaScript, and TypeScript support a `Solve` or `solve` function.
 Arguments are consecutive JSON values in parameter order; string results are

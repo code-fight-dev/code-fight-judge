@@ -97,6 +97,9 @@ jobs:
       - name: Docker build Java runtime
         run: docker build -f docker/judge-java/Dockerfile -t judge-java-ci .
 
+      - name: Docker build C# runtime
+        run: docker build -f docker/judge-csharp/Dockerfile -t judge-csharp-ci .
+
       - name: Install gVisor
         env:
           GVISOR_RELEASE: "20261012.0"
@@ -131,6 +134,7 @@ jobs:
           JUDGE_INTEGRATION_PYTHON_IMAGE: judge-python-ci
           JUDGE_INTEGRATION_CPP_IMAGE: judge-cpp-ci
           JUDGE_INTEGRATION_JAVA_IMAGE: judge-java-ci
+          JUDGE_INTEGRATION_CSHARP_IMAGE: judge-csharp-ci
           JUDGE_INTEGRATION_NODE_IMAGE: judge-node-ci
           JUDGE_TEST_DATABASE_URL: postgres://judge:judge-ci-password@localhost:5432/judge?sslmode=disable
           JUDGE_INTEGRATION_C_IMAGE: judge-c-ci

@@ -14,6 +14,8 @@ const (
 	CPPVersion         = "20"
 	JavaLanguage       = "java"
 	JavaVersion        = "21"
+	CSharpLanguage     = "csharp"
+	CSharpVersion      = "12.0"
 	JavaScriptLanguage = "javascript"
 	JavaScriptVersion  = "node24"
 	TypeScriptLanguage = "typescript"
@@ -28,6 +30,7 @@ type RuntimeImages struct {
 	Python string
 	CPP    string
 	Java   string
+	CSharp string
 	Node   string
 }
 
@@ -127,6 +130,13 @@ func NewDefaultRegistry(images RuntimeImages) *Registry {
 				"-proc:none", "-encoding", "UTF-8", "--release", "21", "-d", "/output", "/workspace/Main.java"},
 			RunCommand: []string{"java", "-Xms8m", "-Xmx32m", "-XX:+UseSerialGC", "-XX:ActiveProcessorCount=1", "-Xshare:off",
 				"-cp", "/output", "Main"},
+		})
+	}
+	if strings.TrimSpace(images.CSharp) != "" {
+		definitions = append(definitions, Definition{
+			Language: CSharpLanguage, Version: CSharpVersion, Image: images.CSharp, SourceFile: "Program.cs",
+			CompileCommand: []string{"/opt/judge-csharp/compile.sh"},
+			RunCommand:     []string{"dotnet", "exec", "--runtimeconfig", "/opt/judge-csharp/Submission.runtimeconfig.json", "/output/Submission.dll"},
 		})
 	}
 	return NewRegistry(definitions)
