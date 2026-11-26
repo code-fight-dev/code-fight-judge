@@ -115,7 +115,7 @@ func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
 		ctx,
 		`
 		WITH picked AS (
-			SELECT id
+			SELECT id, started_at IS NULL AS first_attempt
 			FROM judge_jobs
 			WHERE result_payload IS NULL AND (
 				status = $1 OR (status = $2 AND updated_at < clock_timestamp() - ($3 * interval '1 second'))
@@ -148,7 +148,8 @@ func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
 			j.created_at,
 			j.updated_at,
 			j.started_at,
-			j.finished_at
+			j.finished_at,
+			picked.first_attempt
 		`,
 		jobs.StatusQueued,
 		jobs.StatusRunning,
@@ -175,6 +176,7 @@ func (r *JobsRepo) ClaimNextQueued(ctx context.Context) (*jobs.Job, error) {
 		&job.UpdatedAt,
 		&job.StartedAt,
 		&job.FinishedAt,
+		&job.FirstAttempt,
 	)
 	if err != nil {
 		// no rows = no queued job

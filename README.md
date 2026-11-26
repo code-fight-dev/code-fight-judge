@@ -154,6 +154,12 @@ independently of its execution workers. Two instances configured for one
 worker each can run two jobs at once. A surviving instance can reclaim an
 interrupted execution two minutes after its last lease renewal.
 
+The App Metrics dashboard shows queue depth, oldest eligible job age,
+arrivals per second, active execution workers, first-claim wait, compiler
+duration, and test runtime. Queue depth and age come from the shared database
+and use a maximum across replicas. Per-replica counters and histograms are
+summed. Phase histograms use the available sandbox timings.
+
 ## Execution and resource accounting
 
 A trusted supervisor enforces execution limits and runs submitted code as
