@@ -45,6 +45,11 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 		decoder.DisallowUnknownFields()
 
 		if err := decoder.Decode(&req); err != nil {
+			var tooLarge *stdhttp.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeError(w, stdhttp.StatusRequestEntityTooLarge, "request_too_large", "request body too large")
+				return
+			}
 			writeError(w, stdhttp.StatusBadRequest, "invalid_json", normalizeDecodeError(err))
 			return
 		}
@@ -62,7 +67,7 @@ func (h *JobsHandler) CreateSubmission() stdhttp.HandlerFunc {
 			writeError(w, stdhttp.StatusInternalServerError, "storage_error", err.Error())
 			return
 		}
-		if h.metrics != nil {
+		if h.metrics != nil && !job.Replayed {
 			h.metrics.RecordJobCreated(languages.NormalizeLanguage(req.Language))
 		}
 
