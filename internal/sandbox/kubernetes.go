@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -32,9 +33,20 @@ const credentialsPath = "/var/run/secrets/kubernetes.io/serviceaccount"
 type KubernetesExecutor struct {
 	client                    *http.Client
 	namespace, workspace, pvc string
+	nodeName, cgroupRoot      string
 }
 
 func NewKubernetesExecutor(workspace, pvc string) (*KubernetesExecutor, error) {
+	nodeName := strings.TrimSpace(os.Getenv("JUDGE_KUBERNETES_NODE_NAME"))
+	cgroupRoot := strings.TrimSpace(os.Getenv("JUDGE_KUBERNETES_CGROUP_ROOT"))
+	if (nodeName == "") != (cgroupRoot == "") {
+		return nil, fmt.Errorf("configure both JUDGE_KUBERNETES_NODE_NAME and JUDGE_KUBERNETES_CGROUP_ROOT for sandbox OOM detection")
+	}
+	if cgroupRoot != "" {
+		if _, err := os.Stat(filepath.Join(cgroupRoot, "cgroup.controllers")); err != nil {
+			return nil, fmt.Errorf("read the node's cgroup v2 mount: %w", err)
+		}
+	}
 	namespace, err := os.ReadFile(filepath.Join(credentialsPath, "namespace"))
 	if err != nil {
 		return nil, fmt.Errorf("read Kubernetes namespace: %w", err)
@@ -54,6 +66,7 @@ func NewKubernetesExecutor(workspace, pvc string) (*KubernetesExecutor, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		namespace: strings.TrimSpace(string(namespace)), workspace: workspace, pvc: pvc,
+		nodeName: nodeName, cgroupRoot: cgroupRoot,
 	}, nil
 }
 
@@ -155,10 +168,10 @@ func (e *KubernetesExecutor) Execute(ctx context.Context, req ExecuteRequest) (*
 	defer ticker.Stop()
 	for {
 		report, err := reportFromFile(filepath.Join(reportDir, supervisor.ResultFile), req.OutputKB*1024)
-		if err == nil {
+		if err == nil && !needsOOMObservation(report) {
 			return report, nil
 		}
-		if !os.IsNotExist(err) {
+		if err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 		var podList core.PodList
@@ -167,18 +180,50 @@ func (e *KubernetesExecutor) Execute(ctx context.Context, req ExecuteRequest) (*
 			return nil, err
 		}
 		for _, pod := range podList.Items {
+			if !ownsSandboxPod(created, pod) {
+				continue
+			}
+			var terminal *core.ContainerStateTerminated
 			for _, status := range pod.Status.ContainerStatuses {
-				if terminal := status.State.Terminated; terminal != nil {
-					// The trusted report is renamed before the supervisor exits.
-					report, err := reportFromFile(filepath.Join(reportDir, supervisor.ResultFile), req.OutputKB*1024)
-					if err == nil || !os.IsNotExist(err) {
-						return report, err
-					}
-					if terminal.Reason == "OOMKilled" {
-						return &ExecuteResult{ExitCode: int(terminal.ExitCode), OOMKilled: true, TimeUnavailable: true}, nil
-					}
-					return nil, fmt.Errorf("Kubernetes sandbox exited without a report (%s, exit %d)", terminal.Reason, terminal.ExitCode)
+				if status.Name == "sandbox" {
+					terminal = status.State.Terminated
+					break
 				}
+			}
+			if terminal != nil {
+				// The trusted report is renamed before the supervisor exits.
+				report, err = reportFromFile(filepath.Join(reportDir, supervisor.ResultFile), req.OutputKB*1024)
+				if err != nil && !os.IsNotExist(err) {
+					return nil, err
+				}
+			}
+			if terminal != nil && terminal.Reason == "OOMKilled" {
+				if report == nil {
+					return &ExecuteResult{ExitCode: int(terminal.ExitCode), OOMKilled: true, TimeUnavailable: true}, nil
+				}
+				report.OOMKilled = true
+				return report, nil
+			}
+			if report != nil {
+				if needsOOMObservation(report) && e.cgroupRoot != "" {
+					report.OOMKilled, err = e.sandboxOOM(pod)
+					if err != nil {
+						return nil, err
+					}
+				}
+				return report, nil
+			}
+			if terminal != nil {
+				if terminal.ExitCode == 137 && e.cgroupRoot != "" {
+					killed, err := e.sandboxOOM(pod)
+					if err != nil {
+						return nil, err
+					}
+					if killed {
+						return &ExecuteResult{ExitCode: 137, OOMKilled: true, TimeUnavailable: true}, nil
+					}
+				}
+				return nil, fmt.Errorf("Kubernetes sandbox exited without a report (%s, exit %d)", terminal.Reason, terminal.ExitCode)
 			}
 		}
 		select {
@@ -187,6 +232,65 @@ func (e *KubernetesExecutor) Execute(ctx context.Context, req ExecuteRequest) (*
 		case <-ticker.C:
 		}
 	}
+}
+
+func needsOOMObservation(report *ExecuteResult) bool {
+	return report.ExitCode == 137 && !report.TimedOut && !report.OutputExceeded
+}
+
+func ownsSandboxPod(job batch.Job, pod core.Pod) bool {
+	owner := meta.GetControllerOf(&pod)
+	return owner != nil && owner.Kind == "Job" && owner.UID == job.UID
+}
+
+func (e *KubernetesExecutor) sandboxOOM(pod core.Pod) (bool, error) {
+	uid := string(pod.UID)
+	if pod.Spec.NodeName != e.nodeName || uid == "" || strings.Trim(uid, "0123456789abcdef-") != "" {
+		return false, fmt.Errorf("cannot identify the sandbox cgroup for pod %s", pod.Name)
+	}
+	systemdUID := strings.ReplaceAll(uid, "-", "_")
+	for _, qos := range []string{"", "burstable", "besteffort"} {
+		sliceParent := "kubepods.slice"
+		sliceName := "kubepods"
+		if qos != "" {
+			sliceName += "-" + qos
+			sliceParent = filepath.Join(sliceParent, sliceName+".slice")
+		}
+		dirs := []string{
+			filepath.Join(e.cgroupRoot, "kubepods", qos, "pod"+uid),
+			filepath.Join(e.cgroupRoot, sliceParent, sliceName+"-pod"+systemdUID+".slice"),
+		}
+		for _, dir := range dirs {
+			data, err := os.ReadFile(filepath.Join(dir, "memory.events"))
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return false, fmt.Errorf("read sandbox memory events: %w", err)
+			}
+			return memoryLimitKilled(data)
+		}
+	}
+	return false, fmt.Errorf("memory events unavailable for sandbox pod %s", pod.Name)
+}
+
+func memoryLimitKilled(data []byte) (bool, error) {
+	counts := map[string]uint64{}
+	for _, row := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(row)
+		if len(fields) != 2 || (fields[0] != "oom" && fields[0] != "oom_kill") {
+			continue
+		}
+		value, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return false, fmt.Errorf("invalid sandbox memory event counter: %w", err)
+		}
+		counts[fields[0]] = value
+	}
+	if len(counts) != 2 {
+		return false, fmt.Errorf("sandbox memory events lack OOM counters")
+	}
+	return counts["oom"] > 0 && counts["oom_kill"] > 0, nil
 }
 
 func (e *KubernetesExecutor) subPath(path string) (string, error) {
@@ -218,7 +322,19 @@ func reportFromFile(path string, limit int) (*ExecuteResult, error) {
 
 func (e *KubernetesExecutor) job(name, workspace, output, execution string, req ExecuteRequest) batch.Job {
 	args := []string{"-timeout", req.Timeout.String(), "-output-bytes", strconv.Itoa(req.OutputKB * 1024),
-		"-pids", strconv.Itoa(req.PidsLimit), "-exit-after-report", "--"}
+		"-pids", strconv.Itoa(req.PidsLimit)}
+	var affinity *core.Affinity
+	if e.nodeName != "" {
+		// Keep the dedicated cgroup alive until the executor reads its final events.
+		affinity = &core.Affinity{NodeAffinity: &core.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &core.NodeSelector{NodeSelectorTerms: []core.NodeSelectorTerm{{
+				MatchFields: []core.NodeSelectorRequirement{{Key: "metadata.name", Operator: core.NodeSelectorOpIn, Values: []string{e.nodeName}}},
+			}}},
+		}}
+	} else {
+		args = append(args, "-exit-after-report")
+	}
+	args = append(args, "--")
 	tmpfsMB := req.TmpfsSizeMB
 	if tmpfsMB <= 0 {
 		tmpfsMB = 64
@@ -244,6 +360,7 @@ func (e *KubernetesExecutor) job(name, workspace, output, execution string, req 
 			Template: core.PodTemplateSpec{
 				ObjectMeta: meta.ObjectMeta{Labels: map[string]string{"app.kubernetes.io/component": "judge-sandbox"}},
 				Spec: core.PodSpec{
+					Affinity:         affinity,
 					RuntimeClassName: pointer(kubernetesRuntimeClass), ServiceAccountName: "default",
 					// gVisor shares the Sentry across the pod. The kubelet must apply
 					// the limits to the parent pod cgroup as well as the container.
