@@ -32,6 +32,8 @@ type Config struct {
 	JudgeCImage           string
 	JudgeNodeImage        string
 	JudgeRuntime          string
+	JudgeExecutor         string
+	JudgeWorkspaceClaim   string
 	JudgeWorkerCount      int
 	JudgeCompileTimeout   time.Duration
 	JudgeCPUCount         float64
@@ -73,6 +75,8 @@ func Load() (Config, error) {
 		JudgeCPPImage:         getString("JUDGE_CPP_IMAGE", "judge-cpp:20"),
 		JudgeNodeImage:        getString("JUDGE_NODE_IMAGE", "judge-node:24"),
 		JudgeRuntime:          getString("JUDGE_RUNTIME", "runsc"),
+		JudgeExecutor:         getString("JUDGE_EXECUTOR", "docker"),
+		JudgeWorkspaceClaim:   strings.TrimSpace(os.Getenv("JUDGE_KUBERNETES_WORKSPACE_CLAIM")),
 		JudgeWorkerCount:      workerCount,
 		JudgeCImage:           getString("JUDGE_C_IMAGE", "judge-c:23"),
 		JudgeCompileTimeout:   getDuration("JUDGE_COMPILE_TIMEOUT", DefaultCompileTimeout),
@@ -142,6 +146,15 @@ func Load() (Config, error) {
 	}
 	if strings.TrimSpace(cfg.JudgeRuntime) == "" {
 		return Config{}, fmt.Errorf("JUDGE_RUNTIME is required")
+	}
+	switch cfg.JudgeExecutor {
+	case "docker":
+	case "kubernetes":
+		if cfg.JudgeWorkspaceClaim == "" {
+			return Config{}, fmt.Errorf("JUDGE_KUBERNETES_WORKSPACE_CLAIM is required with the Kubernetes executor")
+		}
+	default:
+		return Config{}, fmt.Errorf("JUDGE_EXECUTOR must be docker or kubernetes")
 	}
 	if cfg.JudgeCompileTimeout <= 0 {
 		return Config{}, fmt.Errorf("JUDGE_COMPILE_TIMEOUT must be > 0")

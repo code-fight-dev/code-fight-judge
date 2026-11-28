@@ -53,10 +53,18 @@ func New() (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init postgres: %w", err)
 	}
-	return newApp(cfg, db), nil
+	var kubernetes *sandbox.KubernetesExecutor
+	if cfg.JudgeExecutor == "kubernetes" {
+		kubernetes, err = sandbox.NewKubernetesExecutor(cfg.JudgeWorkDir, cfg.JudgeWorkspaceClaim)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	return newApp(cfg, db, kubernetes), nil
 }
 
-func newApp(cfg config.Config, db *pgxpool.Pool) *App {
+func newApp(cfg config.Config, db *pgxpool.Pool, kubernetes *sandbox.KubernetesExecutor) *App {
 	jobsRepo := storage.NewJobsRepo(db)
 	judgeMetrics := metrics.NewJudgeMetrics()
 	judgeMetrics.RegisterQueue(jobsRepo.QueueSnapshot)
@@ -81,9 +89,12 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 		checkDocker:   checkDockerVersion,
 		inspectDocker: inspectDockerImage,
 	}
+	var executor sandbox.Executor = sandbox.NewRunscExecutor()
+	if kubernetes != nil {
+		executor = kubernetes
+		readiness.checkKubernetes = kubernetes.CheckReady
+	}
 	router := apphttp.NewRouter(cfg, jobsHandler, languagesHandler, readiness, judgeMetrics)
-
-	executor := sandbox.NewRunscExecutor()
 
 	runnerSvc := runner.NewService(cfg, executor, languageRegistry)
 	callbackClient := callback.NewClient(10*time.Second, cfg.JudgeCallbackURL)
@@ -117,13 +128,14 @@ func newApp(cfg config.Config, db *pgxpool.Pool) *App {
 }
 
 type readinessChecker struct {
-	mu            sync.Mutex
-	checks        map[string]string
-	checkedAt     time.Time
-	checkDatabase func(ctx context.Context) error
-	images        []string
-	checkDocker   func(ctx context.Context) error
-	inspectDocker func(ctx context.Context, image string) error
+	mu              sync.Mutex
+	checks          map[string]string
+	checkedAt       time.Time
+	checkDatabase   func(ctx context.Context) error
+	checkKubernetes func(ctx context.Context) error
+	images          []string
+	checkDocker     func(ctx context.Context) error
+	inspectDocker   func(ctx context.Context, image string) error
 }
 
 func (c *readinessChecker) CheckReady(ctx context.Context) map[string]string {
@@ -150,6 +162,15 @@ func (c *readinessChecker) check(ctx context.Context) map[string]string {
 
 	if err := c.checkDatabase(ctx); err != nil {
 		checks["db"] = err.Error()
+	}
+	if c.checkKubernetes != nil {
+		delete(checks, "docker")
+		delete(checks, "images")
+		checks["kubernetes"] = "ok"
+		if err := c.checkKubernetes(ctx); err != nil {
+			checks["kubernetes"] = err.Error()
+		}
+		return checks
 	}
 
 	if err := c.checkDocker(ctx); err != nil {

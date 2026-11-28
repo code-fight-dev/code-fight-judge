@@ -19,16 +19,30 @@ import (
 	"time"
 
 	"code-fight-judge/internal/supervisor"
+
+	"golang.org/x/sys/unix"
 )
 
 func main() {
 	timeout := flag.Duration("timeout", 0, "task wall time limit")
 	outputBytes := flag.Int("output-bytes", 0, "combined stdout/stderr limit")
 	reportDir := flag.String("report-dir", "/judge-report", "trusted report directory")
+	pids := flag.Uint64("pids", 0, "maximum subprocesses per task UID")
+	exitAfterReport := flag.Bool("exit-after-report", false, "exit immediately after publishing the report")
 	flag.Parse()
 	if os.Getpid() != 1 || os.Geteuid() != 0 || *timeout <= 0 || *outputBytes <= 0 || len(flag.Args()) == 0 {
 		fmt.Fprintln(os.Stderr, "supervisor requires root PID 1, positive limits and a command")
 		os.Exit(1)
+	}
+	if *pids != 0 {
+		for resource, count := range map[int]uint64{
+			unix.RLIMIT_NPROC: *pids, unix.RLIMIT_NOFILE: 256, unix.RLIMIT_FSIZE: 128 << 20,
+		} {
+			if err := unix.Setrlimit(resource, &unix.Rlimit{Cur: count, Max: count}); err != nil {
+				fmt.Fprintln(os.Stderr, "set task resource limit:", err)
+				os.Exit(1)
+			}
+		}
 	}
 	input, err := os.Open("/judge-stdin")
 	if err != nil {
@@ -42,6 +56,9 @@ func main() {
 	if err := writeReport(*reportDir, result); err != nil {
 		fmt.Fprintln(os.Stderr, "write supervisor report:", err)
 		os.Exit(1)
+	}
+	if *exitAfterReport {
+		return
 	}
 	// Preserve the peak until collection, but release resources even if the judge
 	// crashes or Docker becomes unavailable before it can remove the container.

@@ -121,7 +121,7 @@ func TestNewAppBuildsWiring(t *testing.T) {
 		JudgeCallbackBackoff:  time.Millisecond,
 	}
 
-	app := newApp(cfg, nil)
+	app := newApp(cfg, nil, nil)
 
 	if app == nil {
 		t.Fatal("newApp() = nil")
