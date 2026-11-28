@@ -74,6 +74,7 @@ func newApp(cfg config.Config, db *pgxpool.Pool, kubernetes *sandbox.KubernetesE
 		Python: cfg.JudgePythonImage,
 		CPP:    cfg.JudgeCPPImage,
 		Java:   cfg.JudgeJavaImage,
+		CSharp: cfg.JudgeCSharpImage,
 		Node:   cfg.JudgeNodeImage,
 	})
 	jobsHandler := apphttp.NewJobsHandler(jobsRepo, languageRegistry, cfg, judgeMetrics)
@@ -93,6 +94,9 @@ func newApp(cfg config.Config, db *pgxpool.Pool, kubernetes *sandbox.KubernetesE
 	var executor sandbox.Executor = sandbox.NewRunscExecutor()
 	if cfg.JudgeJavaImage != "" {
 		readiness.images = append(readiness.images, cfg.JudgeJavaImage)
+	}
+	if cfg.JudgeCSharpImage != "" {
+		readiness.images = append(readiness.images, cfg.JudgeCSharpImage)
 	}
 	if kubernetes != nil {
 		executor = kubernetes
