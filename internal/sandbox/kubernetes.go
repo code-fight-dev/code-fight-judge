@@ -1,15 +1,10 @@
 package sandbox
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"net/http"
 	"os"
@@ -19,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"code-fight-judge/internal/kube"
 	"code-fight-judge/internal/supervisor"
 
 	batch "k8s.io/api/batch/v1"
@@ -28,12 +24,11 @@ import (
 )
 
 const kubernetesRuntimeClass = "code-fight-gvisor"
-const credentialsPath = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 type KubernetesExecutor struct {
-	client                    *http.Client
-	namespace, workspace, pvc string
-	nodeName, cgroupRoot      string
+	client               *kube.Client
+	workspace, pvc       string
+	nodeName, cgroupRoot string
 }
 
 func NewKubernetesExecutor(workspace, pvc string) (*KubernetesExecutor, error) {
@@ -47,67 +42,18 @@ func NewKubernetesExecutor(workspace, pvc string) (*KubernetesExecutor, error) {
 			return nil, fmt.Errorf("read the node's cgroup v2 mount: %w", err)
 		}
 	}
-	namespace, err := os.ReadFile(filepath.Join(credentialsPath, "namespace"))
+	client, err := kube.NewInClusterClient()
 	if err != nil {
-		return nil, fmt.Errorf("read Kubernetes namespace: %w", err)
-	}
-	ca, err := os.ReadFile(filepath.Join(credentialsPath, "ca.crt"))
-	if err != nil {
-		return nil, fmt.Errorf("read Kubernetes CA: %w", err)
-	}
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(ca) {
-		return nil, fmt.Errorf("invalid Kubernetes CA")
+		return nil, err
 	}
 	return &KubernetesExecutor{
-		client: &http.Client{
-			Timeout:       5 * time.Second,
-			Transport:     &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}},
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
-		namespace: strings.TrimSpace(string(namespace)), workspace: workspace, pvc: pvc,
+		client: client, workspace: workspace, pvc: pvc,
 		nodeName: nodeName, cgroupRoot: cgroupRoot,
 	}, nil
 }
 
 func (e *KubernetesExecutor) CheckReady(ctx context.Context) error {
-	return e.request(ctx, http.MethodGet, "/apis/node.k8s.io/v1/runtimeclasses/"+kubernetesRuntimeClass, nil, nil)
-}
-
-func (e *KubernetesExecutor) request(ctx context.Context, method, path string, payload, result any) error {
-	token, err := os.ReadFile(filepath.Join(credentialsPath, "token"))
-	if err != nil {
-		return err
-	}
-	var body io.Reader
-	if payload != nil {
-		data, err := json.Marshal(payload)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(data)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, "https://kubernetes.default.svc"+path, body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
-	req.Header.Set("Content-Type", "application/json")
-	response, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode/100 != 2 {
-		var status meta.Status
-		_ = json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&status)
-		return fmt.Errorf("Kubernetes %s %s: HTTP %d (%s)", method, path, response.StatusCode, status.Reason)
-	}
-	if result != nil {
-		return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(result)
-	}
-	_, err = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
-	return err
+	return e.client.Request(ctx, http.MethodGet, "/apis/node.k8s.io/v1/runtimeclasses/"+kubernetesRuntimeClass, nil, nil)
 }
 
 func (e *KubernetesExecutor) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error) {
@@ -144,16 +90,16 @@ func (e *KubernetesExecutor) Execute(ctx context.Context, req ExecuteRequest) (*
 	}
 	name := "judge-sandbox-" + strings.ToLower(rand.Text())
 	job := e.job(name, workspace, output, executionPath, req)
-	jobsPath := "/apis/batch/v1/namespaces/" + e.namespace + "/jobs"
+	jobsPath := "/apis/batch/v1/namespaces/" + e.client.Namespace + "/jobs"
 	deletePolicy := meta.DeletePropagationBackground
 	// The request can fail after the API server has created the job.
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
-		_ = e.request(cleanup, http.MethodDelete, jobsPath+"/"+name, meta.DeleteOptions{PropagationPolicy: &deletePolicy}, nil)
+		_ = e.client.Request(cleanup, http.MethodDelete, jobsPath+"/"+name, meta.DeleteOptions{PropagationPolicy: &deletePolicy}, nil)
 	}()
 	var created batch.Job
-	if err := e.request(ctx, http.MethodPost, jobsPath+"?fieldValidation=Strict", job, &created); err != nil {
+	if err := e.client.Request(ctx, http.MethodPost, jobsPath+"?fieldValidation=Strict", job, &created); err != nil {
 		return nil, err
 	}
 	if created.Spec.Template.Spec.Resources == nil ||
@@ -175,8 +121,8 @@ func (e *KubernetesExecutor) Execute(ctx context.Context, req ExecuteRequest) (*
 			return nil, err
 		}
 		var podList core.PodList
-		podsPath := "/api/v1/namespaces/" + e.namespace + "/pods?labelSelector=batch.kubernetes.io%2Fjob-name%3D" + name
-		if err := e.request(deadline, http.MethodGet, podsPath, nil, &podList); err != nil {
+		podsPath := "/api/v1/namespaces/" + e.client.Namespace + "/pods?labelSelector=batch.kubernetes.io%2Fjob-name%3D" + name
+		if err := e.client.Request(deadline, http.MethodGet, podsPath, nil, &podList); err != nil {
 			return nil, err
 		}
 		for _, pod := range podList.Items {
